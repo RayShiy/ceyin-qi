@@ -59,9 +59,9 @@
   /* 顶部时间刻度条：覆盖在频谱顶端，横向与频谱同步滚动 */
   #timeRuler {
     position: absolute; top: 0; left: 48px; right: 0; height: 24px;
-    pointer-events: none; z-index: 7;
-    background: linear-gradient(180deg, rgba(0,0,0,.82), rgba(0,0,0,.28) 70%, rgba(0,0,0,0));
-    border-bottom: 1px solid rgba(255,255,255,.10);
+    pointer-events: none; z-index: 22;
+    background: linear-gradient(180deg, rgba(0,0,0,.92), rgba(0,0,0,.6) 70%, rgba(0,0,0,.28));
+    border-bottom: 1px solid rgba(255,255,255,.14);
     overflow: hidden;
   }
   #rulerCanvas { display: block; height: 24px; }
@@ -104,6 +104,9 @@
     box-shadow: 0 2px 10px rgba(0,0,0,.6);
     display: none;
   }
+  /* 红色音高横线的颜色分级（亮黄 / 白 / 红），由 JS 动态设置 */
+  #crosshairH.hi { border-top-color: var(--yellow); box-shadow: 0 0 6px rgba(255,224,0,.9); }
+  #crosshairH.lo { border-top-color: #ff3b30; box-shadow: 0 0 6px rgba(255,59,48,.9); }
   #emptyHint {
     position: absolute; left: 48px; right: 0; top: 0; bottom: 0;
     display: flex; align-items: center; justify-content: center;
@@ -137,7 +140,8 @@
 
   /* 多轨对比顶部面板 */
   #comparePanel {
-    position: absolute; left: 0; right: 0; top: 0; z-index: 20;    background: rgba(12,12,16,.86); border-bottom: 1px solid var(--line);
+    position: absolute; left: 0; right: 0; top: 26px; z-index: 20;   /* 下移到时间轴下方，保证 0.1s 刻度完整可见 */
+    background: rgba(12,12,16,.86); border-bottom: 1px solid var(--line);
     display: none; flex-direction: column; padding: 6px 8px 2px; gap: 4px;
     max-height: 52%; backdrop-filter: var(--glass);
     border-radius: 0 0 14px 14px; box-shadow: 0 8px 22px rgba(0,0,0,.55);
@@ -412,7 +416,7 @@
 <!-- Toast -->
 <div id="toast"></div>
 
-<input type="file" id="fileInput" accept="audio/*" multiple>
+<input type="file" id="fileInput" accept="audio/*,video/*,.wav,.mp3,.m4a,.m4b,.aac,.ogg,.opus,.flac,.caf,.aiff,.amr,.wma,.mka,.au,.voc,.ac3,.mid,.midi,.mp4,.mov,.mkv,.webm,.3gp" multiple>
 <input type="file" id="jsonInput" accept="application/json,.json">
 
 <script>
@@ -637,8 +641,13 @@ function currentMaxTime(){
 // 录制增长时横向扩展：固定像素/秒，录音多长画布就多宽（时间轴可一直向右滑）
 const MAX_CANVAS_W = 32000; // 浏览器 canvas 宽度安全上限
 function resizeForGrowingTime(t){
-  // 兼容传入 track 对象或时间数值，防 NaN
-  if (t && typeof t === "object") t = t.currentTime || (t.startTime != null ? (performance.now() - t.startTime) / 1000 : 0);
+  // 兼容传入 track 对象或时间数值，防 NaN；续录时把 baseTime 一起计入
+  if (t && typeof t === "object"){
+    const tr = t;
+    const base = tr.baseTime || 0;
+    t = base + (tr.startTime != null ? (performance.now() - tr.startTime) / 1000 : 0);
+    if (tr.points && tr.points.length) t = Math.max(t, tr.points[tr.points.length-1].t + 0.2);
+  }
   t = Number(t); if (!isFinite(t) || t < 0) t = 0;
   const newMax = Math.max(currentMaxTime(), t + 2);
   // 固定像素/秒；仅当超过 canvas 安全上限时才收缩（保证不失真）
@@ -659,50 +668,46 @@ function resizeForGrowingTime(t){
   if (state.followRec) tryAutofollow();
 }
 
-/* ====================== 录制视角自动跟随 ====================== */
-// 是否此刻允许自动跟随：录制中 + 用户未接管 + 已过暂停期
+/* ====================== 录制视角自动跟随 ======================
+   新规则：竖线固定在屏幕正中央。
+   · 横向：不依赖是否解析到音高——按"录音已进行的时间"持续推动内容向左流动，
+           使最新时刻恰好落在屏幕中线上（内容左移、竖线不动）。
+           这样即使整段静音，画面也会随时间的流逝平稳右移（内容左移）。
+   · 纵向：仍按实际音高上下跟随（音高走低→视角下移；走高→上移）。
+   · 用户手动滑动时暂停；停手 1.2s 后自动回到跟随。 */
 function canAutofollow(){
   if (state.mode !== "recording") return false;
   if (state.userScrolling) return false;
   if (Date.now() < (state.autofollowPausedUntil || 0)) return false;
   return true;
 }
-// 视角自动跟随（横向 + 纵向双向），采用"目标制导"持续逼近，避免中途罢工
-//  · 横向：最新点超过可视区右侧 2/3 → 右移
-//  · 纵向：音高接近可视区上 1/3 → 上移；接近下 1/3 → 下移
+// 横向：把"当前录音时刻"对齐到屏幕中线（内容左移、竖线固定）
+function followTimelineByTime(t){
+  if (!state.followRec || state.userScrolling || Date.now() < (state.autofollowPausedUntil || 0)) return;
+  const target = Math.max(0, t * state.px - viewCenterX());
+  state.followTargetX = target;
+}
 function tryAutofollow(){
   if (!canAutofollow()) return;
   const tr = state.tracks[state.activeTrackIdx] || state.tracks[0];
-  if (!tr || !tr.points || !tr.points.length) return;
-  const last = tr.points[tr.points.length - 1];
-  const vw = scrollArea.clientWidth, vh = scrollArea.clientHeight;
-
-  // ---- 横向目标 ----
-  const pointX = (last.t + (tr.offset || 0)) * state.px;
-  const viewLeft = scrollArea.scrollLeft;
-  if (pointX > viewLeft + vw * (2 / 3)){
-    state.followTargetX = Math.max(0, pointX - vw * 0.62);
-  } else if (pointX < viewLeft + vw * 0.12){
-    // 最新点跑到左侧（例如新一段录音从头开始）→ 左移跟随
-    state.followTargetX = Math.max(0, pointX - vw * 0.2);
-  }
-
-  // ---- 纵向目标（双向）----
-  const pointY = midiToY(last.midi);
-  const viewTop = scrollArea.scrollTop;
-  const hiLine = viewTop + vh * (1 / 3);   // 上 1/3 分界
-  const loLine = viewTop + vh * (2 / 3);   // 下 1/3 分界
-  if (pointY < hiLine){
-    // 接近顶部 → 视角上移（把音高拉回中间）
-    state.followTargetY = Math.max(0, pointY - vh * 0.5);
-  } else if (pointY > loLine){
-    // 接近底部 → 视角下移
-    const maxScrollTop = Math.max(0, specCanvas.height - vh);
-    state.followTargetY = Math.min(maxScrollTop, pointY - vh * 0.5);
+  if (!tr) return;
+  const vh = scrollArea.clientHeight;
+  // ---- 纵向：按最新音高（若有）双向跟随 ----
+  if (tr.points && tr.points.length){
+    const last = tr.points[tr.points.length - 1];
+    const pointY = midiToY(last.midi);
+    const viewTop = scrollArea.scrollTop;
+    const hiLine = viewTop + vh * (1 / 3);
+    const loLine = viewTop + vh * (2 / 3);
+    if (pointY < hiLine){
+      state.followTargetY = Math.max(0, pointY - vh * 0.5);
+    } else if (pointY > loLine){
+      const maxScrollTop = Math.max(0, specCanvas.height - vh);
+      state.followTargetY = Math.min(maxScrollTop, pointY - vh * 0.5);
+    }
   }
 }
 // 统一的跟随驱动：每帧朝目标位置平滑逼近（在渲染循环里持续调用）
-// 即使音高剧烈跳动，也会持续跟进到最新目标，不会"跟一下就停"
 let _followRAF = null;
 function driveAutofollow(){
   if (_followRAF) return; // 已有驱动在跑
@@ -714,8 +719,8 @@ function driveAutofollow(){
     // 横向
     if (typeof state.followTargetX === "number"){
       const dx = state.followTargetX - scrollArea.scrollLeft;
-      if (Math.abs(dx) > 1){
-        scrollArea.scrollLeft += dx * 0.18;           // 缓动逼近
+      if (Math.abs(dx) > 0.5){
+        scrollArea.scrollLeft += dx * 0.22;           // 缓动逼近
         need = true;
       }
     }
@@ -727,7 +732,8 @@ function driveAutofollow(){
         need = true;
       }
     }
-    if (need) _followRAF = requestAnimationFrame(step);
+    if (need){ syncRulerScroll?.(); resyncOverlays?.(); }
+    _followRAF = requestAnimationFrame(step);
   };
   _followRAF = requestAnimationFrame(step);
 }
@@ -735,11 +741,14 @@ function driveAutofollow(){
 function reboundToFollow(){
   if (state.mode !== "recording") return;
   const tr = state.tracks[state.activeTrackIdx] || state.tracks[0];
-  if (!tr || !tr.points || !tr.points.length) return;
-  const last = tr.points[tr.points.length - 1];
-  const vw = scrollArea.clientWidth, vh = scrollArea.clientHeight;
-  state.followTargetX = Math.max(0, (last.t + (tr.offset||0)) * state.px - vw * 0.62);
-  state.followTargetY = Math.max(0, Math.min(specCanvas.height - vh, midiToY(last.midi) - vh * 0.5));
+  if (!tr) return;
+  const t = (performance.now() - (tr.startTime || performance.now())) / 1000 + (tr.baseTime || 0);
+  const vh = scrollArea.clientHeight;
+  state.followTargetX = Math.max(0, t * state.px - viewCenterX());
+  if (tr.points && tr.points.length){
+    const last = tr.points[tr.points.length - 1];
+    state.followTargetY = Math.max(0, Math.min(specCanvas.height - vh, midiToY(last.midi) - vh * 0.5));
+  }
   state.userScrolling = false;
   state.followRec = true;
   driveAutofollow();
@@ -778,6 +787,24 @@ function buildNoteAxis(){
 function midiToY(m){ return (MAX_MIDI - m) * SEMI_PX; }
 function yToMidi(y){ return MAX_MIDI - y / SEMI_PX; }
 
+/* 音高配色规则（全局统一）：
+   · 高于 C5（midi > 72）→ 亮黄色
+   · C3 ~ C5（48 ≤ midi ≤ 72）→ 普通白色
+   · 低于 C3（midi < 48）→ 红色 */
+const PITCH_HI = 72 /* C5 */, PITCH_LO = 48 /* C3 */;
+const COLOR_HI = "#ffe000", COLOR_MID = "#ffffff", COLOR_LOW = "#ff3b30";
+function pitchColor(midi){
+  if (midi > PITCH_HI) return COLOR_HI;
+  if (midi < PITCH_LO) return COLOR_LOW;
+  return COLOR_MID;
+}
+// 配色分级名（用于 CSS class 兼容）
+function pitchClass(midi){
+  if (midi > PITCH_HI) return "high";
+  if (midi < PITCH_LO) return "low";
+  return "mid";
+}
+
 function showNoteHz(midi){
   const note = midiToNote(midi);
   const f = midiToFreq(midi);
@@ -793,57 +820,90 @@ function showNoteHz(midi){
   showNoteHz._t2 = setTimeout(()=> document.querySelectorAll(".noteLabel").forEach(el=>el.classList.remove("hot")), 2500);
 }
 
-/* ====================== 红色十字准星 ====================== */
-// 记录最后一次准星的内容坐标，滚动时据此重算屏幕位置
-state.crosshair = { tPos: null, midi: null };
+/* ====================== 红色十字准星 ======================
+   坐标约定（关键）：
+   · 覆盖层元素绝对定位于 #spectrumWrap（含左侧 48px 音名轴 + 滚动区）。
+   · 屏幕坐标 = 音名轴宽度(48) + 内容坐标(t*px / midiToY) − 当前滚动量。
+   · 竖线在"固定模式"下恒等于滚动区正中央 = 48 + vw/2，不随内容移动；
+     横线随音高上下起伏；交点为二者交点（严格耦合到谱线）。 */
+const AXIS_W = 48;                                 // 左侧音名轴宽度（与 CSS #noteAxis 一致）
+state.crosshair = { tPos: null, midi: null, fixed: false };
 state.clickMarker = { tPos: null, midi: null, text: "", until: 0 };
-// 显示十字准星：竖线=时间位置，横线=音高位置，交点=圆点
-// 元素绝对定位于 #spectrumWrap，需减去滚动量换算为屏幕坐标
-function showCrosshair(tPos, midi){
+// 滚动区可视中心在 #spectrumWrap 坐标系中的位置（竖线锁定位置）
+function viewCenterX(){ return AXIS_W + scrollArea.clientWidth / 2; }
+// 显示十字准星：tPos=时间位置，midi=音高，fixed=true 表示竖线锁在屏幕中央
+function showCrosshair(tPos, midi, fixed){
   state.crosshair.tPos = tPos;
   state.crosshair.midi = midi;
+  if (fixed !== undefined) state.crosshair.fixed = !!fixed;
   renderCrosshair();
 }
 function renderCrosshair(){
-  const { tPos, midi } = state.crosshair;
+  const { tPos, midi, fixed } = state.crosshair;
   if (tPos == null) return;
-  const x = tPos * state.px - scrollArea.scrollLeft;
+  const contentX = tPos * state.px;                       // 内容坐标（相对谱线左端）
+  const x = fixed ? viewCenterX() : (AXIS_W + contentX - scrollArea.scrollLeft);
   const y = midiToY(midi) - scrollArea.scrollTop;
-  const vh = scrollArea.clientHeight, vw = scrollArea.clientWidth;
-  const inViewX = x >= -2 && x <= vw + 2;
+  const vh = scrollArea.clientHeight;
+  const vw = scrollArea.clientWidth;
+  const inViewX = fixed || (x >= AXIS_W - 2 && x <= AXIS_W + vw + 2);
   const inViewY = y >= -2 && y <= vh + 2;
+  // 竖线：固定模式下始终显示在屏幕中央
   crosshairV.style.display = inViewX ? "block" : "none";
   crosshairV.style.left = x + "px";
-  crosshairH.style.display = "block";
+  // 横线/圆点：midi 为 null 时（静音段）隐藏，避免出现无意义的横线
+  const havePitch = midi != null;
+  crosshairH.style.display = havePitch ? "block" : "none";
+  crosshairH.style.left = AXIS_W + "px";
+  crosshairH.style.right = "0px";
   crosshairH.style.top = y + "px";
   crosshairH.style.opacity = inViewY ? "1" : "0.22";
-  crosshairDot.style.display = (inViewX && inViewY) ? "block" : "none";
+  // 横线颜色随音高分三级：C5 以上亮黄 / C3–C5 白 / C3 以下红
+  crosshairH.classList.toggle("hi", havePitch && midi > PITCH_HI);
+  crosshairH.classList.toggle("lo", havePitch && midi < PITCH_LO);
+  crosshairDot.style.display = (havePitch && inViewX && inViewY) ? "block" : "none";
   crosshairDot.style.left = x + "px";
   crosshairDot.style.top = y + "px";
+  crosshairDot.style.background = (midi > PITCH_HI) ? COLOR_HI
+    : (midi < PITCH_LO) ? COLOR_LOW : "#ff1744";
 }
 function hideCrosshair(){
   state.crosshair.tPos = null;
+  state.crosshair.fixed = false;
   crosshairV.style.display = "none";
   crosshairH.style.display = "none";
   crosshairDot.style.display = "none";
 }
-function hideCrosshair(){
-  crosshairV.style.display = "none";
-  crosshairH.style.display = "none";
-  crosshairDot.style.display = "none";
-}
-// 录音中/回放中：跟随最新音高点实时更新十字准星
+// 录音中/回放中：跟随最新音高点实时更新十字准星（竖线固定在屏幕中央）
 let _chFadeTimer = null;
-function updateCrosshair(tr, tNow){
+function updateCrosshair(tr, tNow, fixed){
+  // 固定模式（录音/播放）：竖线始终显示在屏幕中央，横线在无有效音高时隐藏
+  if (fixed){
+    const centerT = (scrollArea.scrollLeft + (viewCenterX() - AXIS_W)) / state.px;
+    const pts = (tr && tr.points) || [];
+    let best = null, bestD = Infinity;
+    for (let i = pts.length - 1; i >= 0; i--){
+      const d = Math.abs(pts[i].t + (tr.offset||0) - centerT);
+      if (d < bestD){ bestD = d; best = pts[i]; }
+      if (pts[i].t + (tr.offset||0) < centerT - 2) break;
+    }
+    if (best && bestD <= 0.6){
+      state._lastMidi = best.midi;
+      showCrosshair(best.t + (tr.offset||0), best.midi, true);
+    } else {
+      // 无音高：竖线仍固定在中央，横线/圆点隐藏（midi=null）
+      showCrosshair(centerT, null, true);
+    }
+    return;
+  }
   if (!tr || !tr.points || !tr.points.length) return;
-  // 找到 tNow 附近最近的音高点
   const pts = tr.points;
   let pt = pts[pts.length - 1];
   for (let i = pts.length - 1; i >= 0; i--){ if (pts[i].t <= tNow){ pt = pts[i]; break; } }
-  showCrosshair(pt.t + (tr.offset || 0), pt.midi);
+  showCrosshair(pt.t + (tr.offset || 0), pt.midi, false);
   // 一段时间无更新后自动隐藏
   if (_chFadeTimer) clearTimeout(_chFadeTimer);
-  _chFadeTimer = setTimeout(hideCrosshair, 1200);
+  _chFadeTimer = setTimeout(() => { if (state.mode !== "recording" && state.mode !== "playing") hideCrosshair(); }, 1200);
 }
 
 /* ====================== 点击频谱：绿色音高标记 ====================== */
@@ -861,10 +921,9 @@ function showClickMarker(tPos, midi, noteText){
 function renderClickMarker(){
   if (!state.clickMarker.until || Date.now() > state.clickMarker.until) return;
   const { tPos, midi, text } = state.clickMarker;
-  const x = tPos * state.px - scrollArea.scrollLeft;
+  const x = AXIS_W + tPos * state.px - scrollArea.scrollLeft;
   const y = midiToY(midi) - scrollArea.scrollTop;
-  clickMarkerDot.style.left = x + "px";
-  clickMarkerDot.style.top = y + "px";
+  clickMarkerDot.style.left = x + "px";  clickMarkerDot.style.top = y + "px";
   clickMarkerBox.style.left = x + "px";
   clickMarkerBox.style.top = y + "px";
   clickMarkerBox.textContent = text;
@@ -1239,31 +1298,30 @@ async function startRecording(){
     const chunks = [];
     mr.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
 
-    // 多段录制：若当前轨道已有内容，则自动新开下一条轨道（颜色依次取，最多 MAX_TRACKS 条）
-    let cur = state.tracks[state.activeTrackIdx];
-    if (cur && cur.points && cur.points.length){
-      const filled = state.tracks.filter(t => t.points && t.points.length).length;
-      if (filled >= MAX_TRACKS){
-        stream.getTracks().forEach(t => t.stop());
-        flashNotice("已达录制 / 分析上限（最多 " + MAX_TRACKS + " 段）", 1000);
-        return;
-      }
-      const idx = state.tracks.length;
-      state.compareMode = true;
-      state.tracks.push(newTrack("第 " + (idx + 1) + " 段录音", idx));
-      state.activeTrackIdx = idx;
-      cur = state.tracks[idx];
+    // 续录策略：再次点击录音 = 在上一段末尾继续（同一文件、同一颜色、不留空档）
+    // 只有通过侧栏「叠加录制」才新开一条轨道并换色。
+    let cur = state.tracks[state.activeTrackIdx] || state.tracks[0];
+    if (!cur){
+      cur = newTrack("第 1 段录音", 0);
+      state.tracks = [cur]; state.activeTrackIdx = 0;
     }
+    // 续录起始时刻 = 该轨道已有内容的末尾（若已有）。不留空档。
+    const prevEnd = (cur.points && cur.points.length)
+      ? cur.points[cur.points.length - 1].t + 0.05
+      : (cur.duration || 0);
+    cur.baseTime = prevEnd;
+    cur._recChunks = cur._recChunks || [];   // 累积多段录音的音频分片
+    cur._recBaseDur = cur.duration || 0;     // 续录前的音频时长
+
     const track = cur;
     track.startTime = performance.now();
-    track.points = [];
     track.stream = stream; track.analyser = analyser; track.recorder = mr; track.source = source;
 
     const timeBuf = new Float32Array(analyser.fftSize);
     emptyHint.classList.add("hidden");
     comparePanel.classList.toggle("show", state.compareMode);
 
-    // 无上限录制：用 timeslice 每 1 秒落一片，自动分段存储防内存溢出
+    // 录制：每 1 秒落一片，便于分段存储
     mr.start(1000);
     state.mode = "recording";
     state.followRec = true;
@@ -1271,10 +1329,11 @@ async function startRecording(){
     playBtn.disabled = true;
 
     let lastPoint = 0, lastDraw = 0, lastSeg = -1;
+    const baseT = track.baseTime || 0;
     function loop(){
       if (state.mode !== "recording") return;
       const now = performance.now();
-      const t = (now - track.startTime) / 1000;
+      const t = baseT + (now - track.startTime) / 1000;   // 续录：时间从上次末尾接着走
       analyser.getFloatTimeDomainData(timeBuf);
       drawWave(timeBuf);
       // 分段提示（每 60 秒）：录音数据已由 MediaRecorder 分片，不会一次性占满内存
@@ -1288,10 +1347,13 @@ async function startRecording(){
       if (f > 0 && now - lastPoint > 60){ // 约 16Hz 采样，节省存储与绘制
         lastPoint = now;
         track.points.push({ t, f, midi: freqToMidi(f), note: midiToNote(freqToMidi(f)) });
+        state._lastMidi = freqToMidi(f);
       }
-      // 每帧都更新跟随目标并驱动（音高剧烈跳动也持续跟进，不中断）
+      // 横向：无论是否有声音，都按"录音时间"推动内容左移，使最新时刻落在屏幕中线
+      followTimelineByTime(t);
+      // 每帧都更新跟随目标并驱动（音高剧烈跳动、静音段都持续跟进，不中断）
       if (state.followRec){ tryAutofollow(); driveAutofollow(); }
-      updateCrosshair(track, t); // 十字准星实时跟随最新发音位置
+      updateCrosshair(track, t, true); // 十字准星：竖线锁屏幕中央，横线随音高起伏
       if (now - lastDraw > 80){ lastDraw = now; resizeForGrowingTime(track); drawSpectrum(); syncRulerScroll(); } // 约 12fps 自适应重绘
       track._raf = requestAnimationFrame(loop);
     }
@@ -1299,13 +1361,16 @@ async function startRecording(){
 
     mr.onstop = async () => {
       const blob = new Blob(chunks, { type: mr.mimeType || "audio/webm" });
-      track.blob = blob; track.mime = mr.mimeType;
+      track._recChunks = (track._recChunks || []).concat([blob]);
+      stream.getTracks().forEach(t => t.stop());
+      // 合并该轨道所有录音分片 → 单一音频缓冲（续录后仍是一条完整音轨）
       try {
-        const ab = await blob.arrayBuffer();
+        const merged = new Blob(track._recChunks, { type: mr.mimeType || "audio/webm" });
+        const ab = await merged.arrayBuffer();
         track.audioBuffer = await ctx.decodeAudioData(ab);
         track.duration = track.audioBuffer.duration;
+        track.blob = merged; track.mime = mr.mimeType;
       } catch(e){ console.warn("解码失败", e); }
-      stream.getTracks().forEach(t => t.stop());
       drawSpectrum();
     };
   } catch(err){
@@ -1324,8 +1389,13 @@ function stopRecording(){
   }
   state.mode = "idle";
   state.followRec = false;
+  state.userScrolling = false;
+  state.autofollowPausedUntil = 0;
+  if (_followRAF){ cancelAnimationFrame(_followRAF); _followRAF = null; }
   micBtn.classList.remove("rec"); micBtn.textContent = "●";
   if (state.tracks.some(t => t.points.length)) playBtn.disabled = false;
+  // 停止后重算内容宽度（把最后一段静音的时间也纳入时间轴）
+  try { resizeCanvases(); } catch(e){}
 }
 
 /* ====================== 播放 ====================== */
@@ -1420,12 +1490,10 @@ function updatePitchLabel(tr, tPos, elapsed){
   label.style.left = x + "px";
   label.style.top = y + "px";
   label.textContent = pt.note;
-  label.classList.toggle("high", pt.midi >= 72);  // C5 以上
-  label.classList.toggle("low", pt.midi < 48);    // C3 以下
+  label.classList.toggle("high", pt.midi > PITCH_HI);
+  label.classList.toggle("low", pt.midi < PITCH_LO);
   label.style.borderColor = label.style.color = "";
-  if (pt.midi >= 72) label.style.color = "var(--yellow)";
-  else if (pt.midi < 48) label.style.color = "var(--red)";
-  else label.style.color = "#fff";
+  label.style.color = pitchColor(pt.midi);
   // 保证标签在可视范围时滚动跟随
   const saRect = scrollArea.getBoundingClientRect();
   if (x > scrollArea.scrollLeft + saRect.width - 40) scrollArea.scrollLeft = x - saRect.width + 60;
@@ -1794,13 +1862,21 @@ function showSaveModal(){
 }
 
 /* ====================== 导入多文件 ====================== */
-// 支持的音频扩展名（尽量放宽，覆盖手机常见格式）
-const AUDIO_EXT_RE = /\.(wav|mp3|m4a|mp4|aac|ogg|oga|opus|webm|flac|caf|aif|aiff|amr|3gp|wma|mka|silk|slk|gsm)$/i;
+// 支持的扩展名：尽量放宽，覆盖「常见音频 + 视频容器（自动抽取音轨）」
+const AUDIO_EXT_RE = /\.(wav|wave|mp3|mp2|mpga|m4a|m4b|m4r|mp4|m4v|aac|ogg|oga|opus|webm|flac|alac|caf|aif|aiff|aifc|amr|awb|3gp|3gpp|3g2|3gpp2|wma|mka|mkv|ts|mts|m2ts|mov|avi|flv|f4v|mpg|mpeg|vob|ogv|rm|ra|rmvb|ape|wv|au|snd|voc|ac3|dts|gsm|silk|slk|mid|midi|kar|spx|xm|mod|it|s3m)$/i;
 function isAudioFile(f){
   if (!f) return false;
-  if (f.type && f.type.startsWith("audio")) return true;
-  if (f.type === "video/mp4") return true;      // 有些手机把 m4a 标成 video/mp4
+  const t = (f.type || "").toLowerCase();
+  if (t.startsWith("audio")) return true;
+  if (t.startsWith("video")) return true;       // 视频容器：抽取其音轨
+  if (t === "application/ogg" || t === "application/x-ogg") return true;
   return AUDIO_EXT_RE.test(f.name || "");
+}
+// 是否为视频类容器（解码时给用户额外提示）
+function isVideoContainer(f){
+  const t = (f.type || "").toLowerCase();
+  if (t.startsWith("video")) return true;
+  return /\.(mp4|m4v|webm|mkv|mov|avi|flv|f4v|mpg|mpeg|vob|ogv|rm|rmvb|ts|mts|m2ts|3gp|3gpp|3g2)$/i.test(f.name || "");
 }
 // 纯 JS 解析 WAV（不依赖 decodeAudioData，作为兜底）
 function decodeWavPureJS(arrayBuffer){
@@ -1861,7 +1937,9 @@ async function handleImportFiles(fileList){
   if (!files.length){
     openModal(`<h3>没有可用的音频文件</h3>
       <p>你选择的文件里没有识别到音频。支持的格式：<br>
-      <b>WAV / MP3 / M4A / AAC / OGG / OPUS / FLAC / CAF / AMR / WebM / 3GP</b></p>
+      <b>WAV / MP3 / M4A / AAC / OGG / OPUS / FLAC / CAF / AMR / WebM<br>
+      MP4 / MOV / MKV / AVI / TS / 3GP（视频会自动抽取音轨）<br>
+      WMA / MKA / AU / VOC / AC3 / MIDI 等</b></p>
       <p style="font-size:12px;color:var(--muted)">提示：微信语音（.silk）需先转成 MP3 或 M4A；若在手机上从「文件」App 选择，请确认文件已下载到本地（非云端占位）。</p>
       <div class="row"><button class="mbtn primary" id="impOk">知道了</button></div>`);
     $("impOk").onclick = closeModal;
@@ -1902,14 +1980,25 @@ async function handleImportFiles(fileList){
     try {
       const ab = await f.arrayBuffer();
       let buf = null;
-      // ① 优先用浏览器原生解码
+      // ① 优先用浏览器原生解码（现代浏览器可自动从视频容器中抽取音轨）
       try {
         buf = await ctx.decodeAudioData(ab.slice(0));
       } catch(e1){
         // ② 是 WAV 就用纯 JS 兜底解析
-        const isWav = /\.wav$/i.test(f.name) || (f.type === "audio/wav") || (f.type === "audio/x-wav");
-        if (isWav){ buf = decodeWavPureJS(ab); }
-        else { throw new Error("浏览器不支持该格式（" + (e1.name || "解码失败") + "）"); }
+        const isWav = /\.wav$/i.test(f.name) || (f.type === "audio/wav") || (f.type === "audio/x-wav") || (f.type === "audio/wave");
+        if (isWav){
+          try { buf = decodeWavPureJS(ab); } catch(e2){ errMsg = e2.message || String(e2); }
+        }
+        if (!buf){
+          // ③ 再用 <audio> 元素解码兜底（覆盖 decodeAudioData 不支持的容器，如部分 rm/ape 包装）
+          try { buf = await decodeViaElement(f); } catch(e3){}
+        }
+        if (!buf){
+          const hint = isVideoContainer(f)
+            ? "浏览器无法从该视频容器抽取音轨，建议先用工具转成 MP3/M4A"
+            : "浏览器不支持该格式（" + (e1.name || "解码失败") + "）";
+          throw new Error(hint);
+        }
       }
       addCompareTrackFromBuffer(f.name, buf);
       // 等待该轨道的音高分析完成
@@ -1946,29 +2035,52 @@ function waitTrackAnalyzed(tr, timeoutMs){
     }, 120);
   });
 }
+// 用 <audio>/<video> 元素解码兜底：部分容器 decodeAudioData 不接受，但媒体元素可解
+function decodeViaElement(file){
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const el = document.createElement("video");     // video 可同时承载音/视频容器
+    el.preload = "auto"; el.muted = true; el.playsInline = true; el.src = url;
+    let done = false;
+    const cleanup = () => { try { URL.revokeObjectURL(url); } catch(e){} };
+    const fail = (m) => { if (done) return; done = true; cleanup(); reject(new Error(m)); };
+    const ok = async () => {
+      if (done) return;
+      done = true;
+      try {
+        const ab = await (await fetch(url)).arrayBuffer();
+        const buf = await getCtx().decodeAudioData(ab);
+        cleanup(); resolve(buf);
+      } catch(e){ cleanup(); reject(e); }
+    };
+    el.onloadeddata = ok;
+    el.oncanplaythrough = ok;
+    el.onerror = () => fail("媒体元素无法解析该文件");
+    setTimeout(() => fail("解码超时"), 15000);
+  });
+}
 
-/* ====================== 叠加录制 ====================== */
+/* ====================== 叠加录制（另一条音轨，换色） ====================== */
 function startOverlayMode(){
-  // 录制上限：最多 7 段（对应 7 种颜色）
+  // 叠加分析：新开一条轨道、用下一种颜色，从时间 0 开始（区别于"续录"）
   const activeCount = state.tracks.filter(t => t.points && t.points.length).length;
-  if (state.compareMode && state.tracks.length >= MAX_TRACKS){
+  if (state.compareMode && activeCount >= MAX_TRACKS){
     flashNotice("已达录制 / 分析上限（最多 " + MAX_TRACKS + " 段）", 1000);
     return;
   }
-  // 若已有第一段，准备录下一段
-  if (state.compareMode && state.tracks.length >= 1){
-    const idx = state.tracks.length;            // 颜色按顺序取，与导入 7 文件一致
-    state.tracks.push(newTrack("第 " + (idx + 1) + " 段录音", idx));
-    state.activeTrackIdx = idx;
-  } else {
+  if (!state.compareMode || !state.tracks.some(t => t.points && t.points.length)){
     state.compareMode = true;
     state.tracks = [ newTrack("第 1 段录音", 0) ];
     state.activeTrackIdx = 0;
+  } else {
+    const idx = state.tracks.length;            // 颜色按顺序取，与导入 7 文件一致
+    state.tracks.push(newTrack("叠加 " + (idx + 1), idx));
+    state.activeTrackIdx = idx;
   }
   emptyHint.classList.add("hidden");
   buildComparePanel();
   resizeCanvases();
-  toast("开始录制第 " + (state.activeTrackIdx + 1) + " 段（共 " + MAX_TRACKS + " 段上限）");
+  toast("叠加录制：将从时间 0 开始，用新颜色标记第 " + (state.activeTrackIdx + 1) + " 条音轨");
 }
 
 /* ====================== 确认 / Toast ====================== */
@@ -1990,16 +2102,23 @@ function toast(msg){
 /* ====================== 事件绑定 ====================== */
 const micBtn = $("micBtn"), playBtn = $("playBtn");
 micBtn.addEventListener("click", () => {
-  if (state.mode === "recording"){ stopRecording(); sfxBubble("stop"); }
+  if (state.mode === "recording"){
+    // 暂停录制（不是结束）：再次点击将在原位置继续，仍属同一文件同一颜色
+    stopRecording(); sfxBubble("stop");
+    toast("已暂停，再点一次可接着录");
+  }
   else {
     if (state.mode === "playing") stopAllPlayback();
-    // 已达 7 条上限则提示（已有内容的轨道数）
-    const filled = state.tracks.filter(t => t.points && t.points.length).length;
-    const curHasData = state.tracks[state.activeTrackIdx] && state.tracks[state.activeTrackIdx].points.length;
-    if (!curHasData && filled >= MAX_TRACKS){
-      flashNotice("已达录制 / 分析上限（最多 " + MAX_TRACKS + " 段）", 1000);
-      sfxBubble("tick");
-      return;
+    // 续录不新增轨道，因此不占用 7 条上限；仅当首次录音且无可用轨道时才检查
+    const cur = state.tracks[state.activeTrackIdx];
+    const hasAnyTrack = cur && (state.tracks.length >= 1);
+    if (!hasAnyTrack){
+      const filled = state.tracks.filter(t => t.points && t.points.length).length;
+      if (filled >= MAX_TRACKS){
+        flashNotice("已达录制 / 分析上限（最多 " + MAX_TRACKS + " 段）", 1000);
+        sfxBubble("tick");
+        return;
+      }
     }
     sfxBubble("rec");
     startRecording();
