@@ -55,6 +55,16 @@
   #scrollArea { flex: 1 1 auto; height: 100%; min-height: 0; position: relative; overflow: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y pan-x; overscroll-behavior: contain; }
   #specContent { position: relative; }
   #spectrum { display: block; }
+
+  /* 顶部时间刻度条：覆盖在频谱顶端，横向与频谱同步滚动 */
+  #timeRuler {
+    position: absolute; top: 0; left: 48px; right: 0; height: 24px;
+    pointer-events: none; z-index: 7;
+    background: linear-gradient(180deg, rgba(0,0,0,.82), rgba(0,0,0,.28) 70%, rgba(0,0,0,0));
+    border-bottom: 1px solid rgba(255,255,255,.10);
+    overflow: hidden;
+  }
+  #rulerCanvas { display: block; height: 24px; }
   #emptyHint {
     position: absolute; left: 48px; right: 0; top: 0; bottom: 0;
     display: flex; align-items: center; justify-content: center;
@@ -141,6 +151,17 @@
   }
   .auxBtn:active { background: rgba(255,255,255,.14); }
   .auxBtn[disabled] { opacity: .3; pointer-events: none; }
+
+  /* 白色圆形「清空重来」按钮 */
+  .resetBtn {
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(calc(-50% + 66px), -50%);
+    width: 48px; height: 48px; border-radius: 50%; border: 1px solid rgba(0,0,0,.12);
+    background: #ffffff; color: #111; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.45); transition: transform .1s, background .15s;
+  }
+  .resetBtn:active { transform: translate(calc(-50% + 66px), -50%) scale(.9); background: #e8e8e8; }
+  .resetBtn svg { display: block; }
   .recDot { width: 12px; height: 12px; border-radius: 50%; background: var(--red); }
 
   /* 侧边栏（玻璃质感） */
@@ -245,6 +266,8 @@
         <canvas id="spectrum"></canvas>
       </div>
     </div>
+    <!-- 顶部时间刻度条（与频谱横向同步滚动） -->
+    <div id="timeRuler"><canvas id="rulerCanvas"></canvas></div>
     <div id="emptyHint">
         <div>点击下方麦克风开始录音<br>实时检测你的人声音高<br><span style="font-size:11px;color:var(--muted)">上下滑动可查看完整音域（C1–C8）</span></div>
     </div>
@@ -258,6 +281,11 @@
     <div class="sideToggle" id="sideToggle" title="功能菜单">☰</div>
     <button class="ctrlBtn" id="micBtn" title="录音">●</button>
     <button class="auxBtn" id="playBtn" disabled title="播放">▶ 播放</button>
+    <button class="resetBtn" id="resetBtn" title="清空并重新分析">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        <path d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z" fill="currentColor"/>
+      </svg>
+    </button>
   </div>
 </div>
 
@@ -357,12 +385,16 @@ const state = {
   compareMode: false,      // 多文件对比 / 叠加对比
   recording: null,         // 录制上下文
   audioCtx: null,
+  followRec: false,        // 录制时是否自动跟随视角
+  userScrolling: false,    // 用户是否正在手动控制视角
+  autofollowPausedUntil: 0,// 用户手动操作后暂停跟随的截止时间戳
 };
 
 /* ====================== DOM ====================== */
 const $ = (id) => document.getElementById(id);
 const waveCanvas = $("wave"), waveCtx = waveCanvas.getContext("2d");
 const specCanvas = $("spectrum"), specCtx = specCanvas.getContext("2d");
+const rulerCanvas = $("rulerCanvas"), rulerCtx = rulerCanvas.getContext("2d");
 const noteAxis = $("noteAxis"), noteAxisInner = $("noteAxisInner"), scrollArea = $("scrollArea"), specContent = $("specContent");
 const emptyHint = $("emptyHint"), comparePanel = $("comparePanel");
 const notePopup = $("notePopup"), toastEl = $("toast");
@@ -379,20 +411,23 @@ function resizeCanvases(){
   // 纵向：内容高度 = 可视高度 × 3（约 1/3 可见），用户可上下滑动看全音域 C1–C8
   const contentH = Math.max(sh * 3, SEMI_COUNT * 12);
   SEMI_PX = contentH / SEMI_COUNT;
-  // 横向：像素/秒自适应，保证长时间录制总宽不超过画布上限
+  // 横向：固定像素/秒（不再随长度收缩），录音多长、时间轴就能滑多远
   const maxT = currentMaxTime();
-  const px = Math.min(PX_PER_SEC, 16000 / Math.max(maxT, 1));
-  state.px = Math.max(px, 6);
-  const contentW = Math.max(scrollArea.clientWidth, maxT * state.px + 60);
+  let px = Math.max(PX_PER_SEC, 6);
+  if (maxT * px + 60 > 32000) px = Math.max(6, (32000 - 60) / maxT);
+  state.px = px;
+  const contentW = Math.max(scrollArea.clientWidth, Math.round(maxT * state.px + 60));
 
   specContent.style.width = contentW + "px";
   specContent.style.height = contentH + "px";
   noteAxisInner.style.height = contentH + "px";
-  // 频谱画布：纵向 DPR=1（避免总高过大），横向按自适应像素
+  // 频谱画布：纵向 DPR=1（避免总高过大），横向固定像素/秒
   specCanvas.style.width = contentW + "px";
   specCanvas.style.height = contentH + "px";
   specCanvas.width = contentW;   // DPR=1
   specCanvas.height = contentH;
+  // 顶部时间刻度条：宽度跟随整个内容宽度（横向与频谱同步滚动）
+  layoutRuler(contentW);
 
   if (!state.scrolledInit){
     state.scrolledInit = true;
@@ -401,6 +436,76 @@ function resizeCanvases(){
   buildNoteAxis();
   drawSpectrum();
 }
+
+/* ====================== 顶部时间刻度条 ====================== */
+// 尺寸：宽度 = 可视区宽度（只绘制可视范围，避免超长画布），随 scrollLeft 重绘
+function layoutRuler(contentW){
+  if (!rulerCanvas) return;
+  const h = 24;
+  const vw = Math.max(1, scrollArea.clientWidth);
+  rulerCanvas.style.width = vw + "px";
+  rulerCanvas.style.height = h + "px";
+  if (rulerCanvas.width !== vw || rulerCanvas.height !== h){
+    rulerCanvas.width = vw;
+    rulerCanvas.height = h;
+  }
+  drawRuler();
+}
+// 滚动时重绘（保证刻度始终对齐当前可视时间范围）
+function syncRulerScroll(){
+  if (!rulerCanvas) return;
+  if (rulerCanvas.width !== Math.max(1, scrollArea.clientWidth)){
+    layoutRuler();
+    return;
+  }
+  drawRuler();
+}
+// 绘制：每 1 秒一条主刻度并标数字；0.1 秒一条小分度（0.5 秒为中刻度）
+// 以 scrollLeft 为起点，只画可视区，因此超长录音也不会卡
+function drawRuler(){
+  if (!rulerCanvas || !rulerCtx) return;
+  const w = rulerCanvas.width, h = rulerCanvas.height;
+  if (!w || !h) return;
+  const px = state.px || PX_PER_SEC;
+  const offsetPx = scrollArea.scrollLeft;         // 当前可视区左边缘对应的像素位置
+  const startT = Math.max(0, Math.floor(offsetPx / px));           // 起始整秒
+  const endT = Math.ceil((offsetPx + w) / px) + 1;
+
+  rulerCtx.clearRect(0, 0, w, h);
+  rulerCtx.fillStyle = "rgba(8,8,12,.86)";
+  rulerCtx.fillRect(0, 0, w, h);
+  rulerCtx.textBaseline = "top";
+  rulerCtx.font = "10px -apple-system,BlinkMacSystemFont,sans-serif";
+
+  for (let sec = startT; sec <= endT; sec++){
+    for (let d = 0; d < 10; d++){
+      const t = sec + d * 0.1;
+      const x = t * px - offsetPx;   // 转换为屏幕坐标
+      if (x < -2 || x > w + 2) continue;
+      let len, alpha;
+      if (d === 0){ len = 13; alpha = .95; }        // 整秒：长刻度
+      else if (d === 5){ len = 8; alpha = .55; }    // 0.5s：中刻度
+      else { len = 4; alpha = .30; }                // 0.1s：短分度
+      rulerCtx.strokeStyle = "rgba(200,205,220," + alpha + ")";
+      rulerCtx.lineWidth = d === 0 ? 1.2 : 1;
+      rulerCtx.beginPath();
+      rulerCtx.moveTo(x + 0.5, 0);
+      rulerCtx.lineTo(x + 0.5, len);
+      rulerCtx.stroke();
+    }
+    // 整秒数字标签
+    const x = sec * px - offsetPx;
+    if (x >= -20 && x <= w){
+      rulerCtx.fillStyle = "rgba(215,220,235,.92)";
+      rulerCtx.fillText(sec + "s", x + 3, 12);
+    }
+  }
+  // 底部基线
+  rulerCtx.strokeStyle = "rgba(255,255,255,.14)";
+  rulerCtx.lineWidth = 1;
+  rulerCtx.beginPath(); rulerCtx.moveTo(0, h - 0.5); rulerCtx.lineTo(w, h - 0.5); rulerCtx.stroke();
+}
+
 // 自动定位到人声区（C4 附近居中），C1–C8 全音域仍在画布上可滑动查看
 function centerOnC4(){
   const sh = scrollArea.clientHeight;
@@ -416,23 +521,88 @@ function currentMaxTime(){
   }
   return t;
 }
-// 录制增长时横向自适应：像素/秒随时间收缩，画布宽度不超上限
+// 录制增长时横向扩展：固定像素/秒，录音多长画布就多宽（时间轴可一直向右滑）
+const MAX_CANVAS_W = 32000; // 浏览器 canvas 宽度安全上限
 function resizeForGrowingTime(t){
   // 兼容传入 track 对象或时间数值，防 NaN
   if (t && typeof t === "object") t = t.currentTime || (t.startTime != null ? (performance.now() - t.startTime) / 1000 : 0);
   t = Number(t); if (!isFinite(t) || t < 0) t = 0;
   const newMax = Math.max(currentMaxTime(), t + 2);
-  const px = Math.max(6, Math.min(PX_PER_SEC, 16000 / newMax));
+  // 固定像素/秒；仅当超过 canvas 安全上限时才收缩（保证不失真）
+  let px = PX_PER_SEC;
+  if (newMax * px + 60 > MAX_CANVAS_W) px = Math.max(6, (MAX_CANVAS_W - 60) / newMax);
   if (!isFinite(px) || px <= 0) return;
-  if (state.px && Math.abs(px - state.px) / state.px < 0.05) return; // 变化小于 5% 才重排，避免抖动
+  const widthChanged = Math.abs(px - (state.px || 0)) > 0.01;
   state.px = px;
   const contentW = Math.max(scrollArea.clientWidth, Math.round(newMax * state.px + 60));
   if (!isFinite(contentW) || contentW <= 0) return;
   specContent.style.width = contentW + "px";
   specCanvas.style.width = contentW + "px";
-  specCanvas.width = contentW;
-  // 自动跟随最新录制位置
-  if (state.followRec) scrollArea.scrollLeft = Math.max(0, contentW - scrollArea.clientWidth);
+  // 仅在宽度确实需要变化时才重设 canvas.width（重设会清空画布）
+  if (specCanvas.width !== contentW){
+    specCanvas.width = contentW;
+  }
+  // 自动跟随最新录制位置（由 tryAutofollow 统一管理）
+  if (state.followRec) tryAutofollow();
+}
+
+/* ====================== 录制视角自动跟随 ====================== */
+// 是否此刻允许自动跟随：录制中 + 用户未接管 + 已过暂停期
+function canAutofollow(){
+  if (state.mode !== "recording") return false;
+  if (state.userScrolling) return false;
+  if (Date.now() < (state.autofollowPausedUntil || 0)) return false;
+  return true;
+}
+// 横向 + 纵向智能跟随：
+//  · 最新点超过可视区右侧 2/3 时，横向缓慢跟随
+//  · 最新点高于可视区上侧 1/3 时，纵向缓慢跟随
+function tryAutofollow(){
+  if (!canAutofollow()) return;
+  const tr = state.tracks[state.activeTrackIdx] || state.tracks[0];
+  if (!tr || !tr.points || !tr.points.length) return;
+  const last = tr.points[tr.points.length - 1];
+
+  // ---- 横向跟随 ----
+  const vw = scrollArea.clientWidth;
+  const pointX = (last.t + (tr.offset || 0)) * state.px;
+  const viewLeft = scrollArea.scrollLeft;
+  const rightThreshold = viewLeft + vw * (2 / 3);
+  if (pointX > rightThreshold){
+    const target = Math.max(0, Math.round(pointX - vw * 0.65));
+    smoothScrollTo(scrollArea, "scrollLeft", target, 140);
+  }
+
+  // ---- 纵向跟随 ----
+  const vh = scrollArea.clientHeight;
+  const pointY = midiToY(last.midi);
+  const viewTop = scrollArea.scrollTop;
+  const topThreshold = viewTop + vh * (1 / 3);
+  if (pointY < topThreshold){
+    // 音高接近可视区顶部 1/3 → 视角向上移动（scrollTop 减小）
+    const target = Math.max(0, Math.round(pointY - vh / 2));
+    smoothScrollTo(scrollArea, "scrollTop", target, 140);
+  }
+}
+// 用一个极轻量的缓动，让跟随"缓慢平滑"而非跳变
+function smoothScrollTo(el, prop, target, duration){
+  const start = el[prop];
+  const dist = target - start;
+  if (Math.abs(dist) < 1) return;
+  const t0 = performance.now();
+  const key = "_smooth_" + prop;
+  if (el[key]) cancelAnimationFrame(el[key]);
+  const step = (now) => {
+    // 若中途用户接管，立即停止
+    if (!canAutofollow()){ el[key] = null; return; }
+    const k = Math.min(1, (now - t0) / duration);
+    const ease = 1 - Math.pow(1 - k, 3); // easeOutCubic
+    const cur = el[prop];
+    el[prop] = start + dist * ease;
+    if (k < 1) el[key] = requestAnimationFrame(step);
+    else el[key] = null;
+  };
+  el[key] = requestAnimationFrame(step);
 }
 
 /* ====================== 音名纵轴 ====================== */
@@ -846,8 +1016,9 @@ async function startRecording(){
       if (f > 0 && now - lastPoint > 60){ // 约 16Hz 采样，节省存储与绘制
         lastPoint = now;
         track.points.push({ t, f, midi: freqToMidi(f), note: midiToNote(freqToMidi(f)) });
+        if (state.followRec) tryAutofollow(); // 音高超出可视区阈值时平滑跟随
       }
-      if (now - lastDraw > 80){ lastDraw = now; resizeForGrowingTime(track); drawSpectrum(); } // 约 12fps 自适应重绘
+      if (now - lastDraw > 80){ lastDraw = now; resizeForGrowingTime(track); drawSpectrum(); syncRulerScroll(); } // 约 12fps 自适应重绘
       track._raf = requestAnimationFrame(loop);
     }
     loop();
@@ -1373,6 +1544,55 @@ micBtn.addEventListener("click", () => {
 });
 playBtn.addEventListener("click", () => { sfxBubble("tick"); playAll(); });
 
+/* ===== 清空当前分析结果，回到最原始状态重新开始 ===== */
+$("resetBtn").addEventListener("click", async () => {
+  sfxBubble("tick");
+  const anyData = state.tracks.some(t => (t.points && t.points.length) || t.audioBuffer || t.blob);
+  const msg = anyData
+    ? "将清空当前已分析的所有音频与录音，回到最原始状态，开始新一轮分析。此操作不可撤销，是否继续？"
+    : "当前没有已分析的内容，是否重置为初始状态？";
+  const ok = await confirmDialog("清空当前分析结果？", msg);
+  if (!ok) return;
+  resetToInitial();
+  sfxBubble("send");
+  toast("已清空，回到初始状态");
+});
+
+// 重置：停止一切播放/录制，清空所有轨道，恢复初始单轨道与提示
+function resetToInitial(){
+  try { if (state.mode === "recording") stopRecording(); } catch(e) {}
+  try { if (state.mode === "playing") stopAllPlayback(); } catch(e) {}
+  // 断开可能残留的麦克风流
+  try {
+    if (state.recording && state.recording.stream){
+      state.recording.stream.getTracks().forEach(t => t.stop());
+    }
+  } catch(e) {}
+  state.mode = "idle";
+  state.recording = null;
+  state.followRec = false;
+  state.userScrolling = false;
+  state.autofollowPausedUntil = 0;
+  state.compareMode = false;
+  state.activeTrackIdx = 0;
+  // 恢复初始单轨道
+  state.tracks = [ newTrack("第 1 段录音", 0) ];
+  // UI 复位
+  micBtn.classList.remove("rec"); micBtn.textContent = "●";
+  playBtn.textContent = "▶ 播放"; playBtn.disabled = true;
+  comparePanel.classList.remove("show"); comparePanel.innerHTML = "";
+  emptyHint.classList.remove("hidden");
+  // 清空本地对比/会话暂存（保留已保存录音列表，用户可在侧栏自行删除）
+  try { state.tracks.forEach(t => { t.points = []; }); } catch(e) {}
+  // 视角与画布复位
+  scrollArea.scrollLeft = 0;
+  state.scrolledInit = false;
+  resizeCanvases();
+  centerOnC4();
+  buildComparePanel();
+  drawSpectrum();
+}
+
 $("sideToggle").addEventListener("click", () => { sfxBubble("open"); $("sidebar").classList.add("show"); $("overlay").classList.add("show"); });
 $("sideClose").addEventListener("click", closeSide);
 $("overlay").addEventListener("click", closeSide);
@@ -1536,16 +1756,28 @@ function init(){
   renderSessList();
   registerServiceWorker();
   if (!initStorage()) toast("本地存储不可用，录音将无法保存（可能为隐私模式）");
-  // 音名纵轴随频谱纵向滚动同步；用户手动横向滚动时暂停自动跟随
+  // 音名纵轴随频谱纵向滚动同步；顶部刻度条随横向滚动同步
   scrollArea.addEventListener("scroll", () => {
     noteAxis.scrollTop = scrollArea.scrollTop;
+    syncRulerScroll();
+    // 用户实际拖动时暂停自动跟随
     if (state.userScrolling) state.followRec = false;
   }, { passive: true });
-  // 触摸/滚轮操作视为用户主动滚动
-  scrollArea.addEventListener("touchstart", () => { state.userScrolling = true; }, { passive: true });
-  scrollArea.addEventListener("touchend", () => { setTimeout(() => state.userScrolling = false, 300); }, { passive: true });
-  scrollArea.addEventListener("wheel", () => { state.followRec = false; }, { passive: true });
-  // 初始单轨道
+  // 触摸/滚轮操作视为用户主动控制视角 → 暂停自动跟随，并在停手后 1.5 秒恢复
+  const pauseAutofollow = () => {
+    state.userScrolling = true;
+    state.followRec = false;
+    state.autofollowPausedUntil = Date.now() + 1500; // 停手 1.5 秒后恢复跟随
+  };
+  scrollArea.addEventListener("touchstart", pauseAutofollow, { passive: true });
+  scrollArea.addEventListener("touchmove", pauseAutofollow, { passive: true });
+  scrollArea.addEventListener("touchend", () => { state.userScrolling = false; }, { passive: true });
+  scrollArea.addEventListener("wheel", pauseAutofollow, { passive: true });
+  // 频谱区以外的任意点击也视为用户接管视角
+  document.addEventListener("touchstart", (e) => {
+    if (scrollArea.contains(e.target)) return;
+  }, { passive: true });
+  // 初始化单轨道
   state.tracks = [ newTrack("第 1 段录音", 0) ];
   firstLaunchCard();
 }
