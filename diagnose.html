@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#000">
+<title>麦克风诊断</title>
+<style>
+  body{margin:0;background:#000;color:#eee;font-family:-apple-system,"PingFang SC",sans-serif;padding:16px;line-height:1.6}
+  h1{font-size:18px}
+  .row{background:#15151a;border:1px solid #2a2a30;border-radius:12px;padding:12px;margin:8px 0;font-size:13px}
+  .k{color:#8a8a94;font-size:11px}
+  .ok{color:#5dff8f}.bad{color:#ff5b5b}.warn{color:#ffe000}
+  button{background:#ffe000;color:#000;border:0;padding:14px;border-radius:12px;font-size:16px;font-weight:700;width:100%;margin-top:12px}
+  pre{background:#0c0c10;border:1px solid #2a2a30;border-radius:10px;padding:10px;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto}
+</style>
+</head>
+<body>
+<h1>🎤 麦克风诊断</h1>
+<div id="out"></div>
+<button onclick="test()">点击测试麦克风</button>
+<button onclick="copyAll()" style="background:#222;color:#fff;border:1px solid #444">复制全部诊断信息</button>
+<pre id="raw">点击上面的按钮开始测试…</pre>
+
+<script>
+const out = document.getElementById('out');
+const lines = [];
+function line(k, v, cls){ lines.push(k + ': ' + v); return `<div class="row"><div class="k">${k}</div><div class="${cls||''}">${v}</div></div>`; }
+
+function inApp(){
+  const ua = navigator.userAgent || '';
+  if (/MicroMessenger/i.test(ua)) return '微信内置浏览器（会屏蔽麦克风）';
+  if (/QQ\//i.test(ua)) return 'QQ 内置浏览器（会屏蔽麦克风）';
+  if (/DingTalk/i.test(ua)) return '钉钉内置浏览器';
+  return '';
+}
+
+function env(){
+  let h = '';
+  h += line('页面地址', location.href);
+  h += line('协议', location.protocol);
+  h += line('安全上下文 isSecureContext', String(window.isSecureContext),
+        window.isSecureContext ? 'ok' : 'bad');
+  h += line('是否在 iframe 中', String(window.top !== window.self),
+        window.top !== window.self ? 'bad' : 'ok');
+  h += line('内置浏览器', inApp() || '否', inApp() ? 'bad' : 'ok');
+  h += line('mediaDevices 存在', String(!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)),
+        (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) ? 'ok' : 'bad');
+  h += line('UserAgent', navigator.userAgent);
+  out.innerHTML = h;
+  return h;
+}
+
+async function test(){
+  out.innerHTML = env();
+  const pre = document.getElementById('raw');
+  try {
+    pre.textContent = '正在请求麦克风…';
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const track = stream.getAudioTracks()[0];
+    const s = track.getSettings();
+    const msg = '成功！\n设备: ' + (track.label || '未命名') + '\n采样率: ' + (s.sampleRate||'?') + '\n声道: ' + (s.channelCount||'?');
+    pre.textContent = msg;
+    out.innerHTML += line('测试结果', '✅ 麦克风可用', 'ok');
+    stream.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    let why = e.name + ': ' + e.message;
+    let hint = '';
+    if (e.name === 'NotAllowedError') hint = '→ 权限被拒 / 非安全环境 / iframe 未授权麦克风';
+    if (e.name === 'NotFoundError') hint = '→ 没有麦克风设备';
+    if (e.name === 'NotReadableError') hint = '→ 麦克风被其他程序占用';
+    pre.textContent = '失败\n' + why + '\n' + hint;
+    out.innerHTML += line('测试结果', '❌ ' + why + ' ' + hint, 'bad');
+  }
+}
+
+function copyAll(){
+  const txt = '【麦克风诊断报告】\n' + lines.join('\n') + '\n\n【原始输出】\n' + document.getElementById('raw').textContent;
+  navigator.clipboard.writeText(txt).then(
+    () => alert('已复制，粘贴发给我即可'),
+    () => alert('复制失败，请手动选中复制')
+  );
+}
+env();
+</script>
+</body>
+</html>

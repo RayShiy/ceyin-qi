@@ -1,0 +1,1575 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="音高检测">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<link rel="icon" type="image/png" href="./icons/icon-192.png">
+<title>音高检测与对比器</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  :root {
+    --bg: #000; --panel: rgba(22,22,26,.72); --panel-solid:#16161a; --line: #2a2a30; --line2: #3a3a44;
+    --yellow: #ffe000; --white: #fff; --blue: #4da6ff; --red: #ff3b3b;
+    --text: #e8e8ec; --muted: #8a8a94;
+    --c-yellow: #ffe000; --c-white: #ffffff; --c-blue: #7ec8ff;
+    --c-orange: #ff9a3c; --c-red: #ff2d2d; --c-pink: #ff7ad9; --c-purple: #8a2be2;
+    --glass: saturate(160%) blur(18px);
+    --shadow: 0 8px 28px rgba(0,0,0,.55);
+    --glow-y: 0 0 18px rgba(255,224,0,.35);
+  }
+  html, body {
+    height: 100%; width: 100%; overflow: hidden;
+    background: radial-gradient(120% 80% at 50% 0%, #15151b 0%, #000 60%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    -webkit-user-select: none; user-select: none; touch-action: manipulation;
+  }
+  #app { display: flex; flex-direction: column; height: 100%; position: relative; }
+
+  /* 顶部波形区 */
+  #waveformWrap { height: 10%; min-height: 58px; position: relative; background: linear-gradient(180deg,#0c0c10,#060608); border-bottom: 1px solid var(--line); box-shadow: inset 0 -1px 0 rgba(255,255,255,.04); }
+  #wave { display: block; width: 100%; height: 100%; }
+  #waveHint { position: absolute; left: 10px; top: 6px; font-size: 10px; color: var(--muted); letter-spacing: .5px; pointer-events: none; }
+
+  /* 主频谱区 */
+  #spectrumWrap { flex: 1 1 auto; position: relative; display: flex; overflow: hidden; min-height: 0; }
+  #noteAxis { width: 48px; flex: 0 0 48px; height: 100%; overflow: hidden; position: relative; background: linear-gradient(90deg,#000,#0a0a0e); border-right: 1px solid var(--line); pointer-events: none; }
+  #noteAxisInner { position: relative; width: 100%; }
+  .noteLabel {
+    position: absolute; right: 4px; transform: translateY(-50%);
+    font-size: 9px; line-height: 1; color: var(--muted); cursor: pointer; white-space: nowrap;
+    padding: 2px 4px; border-radius: 6px; text-align: right; transition: background .15s, color .15s;
+    pointer-events: auto;
+  }
+  .noteLabel.isC { color: var(--white); font-size: 10px; font-weight: 700; }
+  .noteLabel:active, .noteLabel.hot { background: var(--yellow); color: #000; box-shadow: var(--glow-y); }
+
+  /* 滚动层：显式高度 + 明确允许横纵手势，保证任何情况下都能上下滑动看音域 */
+  #scrollArea { flex: 1 1 auto; height: 100%; min-height: 0; position: relative; overflow: auto; -webkit-overflow-scrolling: touch; touch-action: pan-y pan-x; overscroll-behavior: contain; }
+  #specContent { position: relative; }
+  #spectrum { display: block; }
+  #emptyHint {
+    position: absolute; left: 48px; right: 0; top: 0; bottom: 0;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 10px; color: var(--muted); font-size: 13px; text-align: center; padding: 0 20px; pointer-events: none; z-index: 6;
+    transition: opacity .3s;
+  }
+  #emptyHint > * { background: rgba(0,0,0,.55); backdrop-filter: blur(2px); border-radius: 10px; padding: 2px 10px; }
+  #emptyHint .big { font-size: 34px; filter: drop-shadow(0 0 10px rgba(255,224,0,.4)); background: none; }
+
+  /* 播放跟随标签 */
+  .pitchLabel {
+    position: absolute; transform: translate(-50%, -50%);
+    background: rgba(0,0,0,.85); color: #fff; border: 1px solid rgba(255,255,255,.7);
+    padding: 3px 8px; border-radius: 10px; font-size: 12px; font-weight: 700;
+    pointer-events: none; white-space: nowrap; z-index: 5; backdrop-filter: var(--glass);
+    box-shadow: 0 2px 10px rgba(0,0,0,.6);
+  }
+  .pitchLabel.high { color: var(--yellow); border-color: var(--yellow); box-shadow: var(--glow-y); }
+  .pitchLabel.low { color: var(--red); border-color: var(--red); box-shadow: 0 0 14px rgba(255,59,59,.45); }
+
+  /* 音名 Hz 弹窗 */
+  #notePopup {
+    position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
+    background: rgba(10,10,12,.86); color: #fff; border: 1px solid var(--yellow);
+    padding: 8px 16px; border-radius: 14px; font-size: 15px; font-weight: 600;
+    z-index: 30; opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; text-align: center;
+    backdrop-filter: var(--glass); box-shadow: var(--glow-y), var(--shadow);
+  }
+  #notePopup.show { opacity: 1; transform: translateX(-50%) translateY(2px); }
+  #notePopup small { display: block; color: var(--muted); font-weight: 400; font-size: 10px; margin-top: 2px; }
+
+  /* 多轨对比顶部面板 */
+  #comparePanel {
+    position: absolute; left: 0; right: 0; top: 0; z-index: 20;
+    background: rgba(12,12,16,.78); border-bottom: 1px solid var(--line);
+    display: none; flex-direction: column; padding: 6px 8px; gap: 4px; max-height: 48%; overflow-y: auto;
+    backdrop-filter: var(--glass);
+  }
+  #comparePanel.show { display: flex; }
+  .cmpRow { display: flex; align-items: center; gap: 8px; font-size: 11px; background: rgba(255,255,255,.03); border-radius: 10px; padding: 3px 6px; }
+  .cmpDot {
+    width: 15px; height: 15px; border-radius: 50%; flex: 0 0 15px; border: 2px solid transparent;
+    box-shadow: 0 0 0 1px #000, 0 0 6px currentColor;
+  }
+  .cmpDot.active { border-color: #fff; box-shadow: 0 0 0 1px #000, 0 0 8px #fff; }
+  .cmpName { flex: 1 1 auto; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 2px; }
+  .cmpName:active { color: var(--yellow); }
+  .cmpIcon {
+    width: 26px; height: 26px; flex: 0 0 26px; border: 1px solid var(--line2); border-radius: 8px;
+    display: flex; align-items: center; justify-content: center; color: var(--white); font-size: 11px; background: rgba(255,255,255,.05);
+    transition: color .15s, border-color .15s, background .15s;
+  }
+  .cmpIcon:active { background: rgba(255,255,255,.12); }
+  .cmpIcon.on { color: var(--blue); border-color: var(--blue); background: rgba(77,166,255,.12); box-shadow: 0 0 10px rgba(77,166,255,.4); }
+  .cmpIcon.bgm { font-weight: 800; letter-spacing: -1px; }
+  .cmpOffsetWrap { display: none; padding: 4px 8px 6px 26px; }
+  .cmpOffsetWrap.show { display: block; }
+  .cmpOffsetWrap input[type=range] { width: 100%; accent-color: var(--blue); }
+
+  /* 底部控制栏 */
+  #controls { height: 13%; min-height: 78px; flex: 0 0 auto; position: relative;
+    display: flex; align-items: center; justify-content: center; border-top: 1px solid var(--line);
+    background: linear-gradient(0deg,#0a0a0e,#060608); box-shadow: inset 0 1px 0 rgba(255,255,255,.04); }
+  .ctrlBtn {
+    width: 70px; height: 70px; border-radius: 50%; border: none; color: #000; font-size: 28px;
+    display: flex; align-items: center; justify-content: center; background: var(--yellow);
+    box-shadow: var(--glow-y), 0 6px 18px rgba(0,0,0,.5); cursor: pointer; transition: transform .1s;
+  }
+  .ctrlBtn.rec { background: var(--red); color: #fff; box-shadow: 0 0 18px rgba(255,59,59,.55), 0 6px 18px rgba(0,0,0,.5); animation: pulse 1.2s infinite; }
+  .ctrlBtn:active { transform: scale(.93); }
+  @keyframes pulse { 0%,100%{ box-shadow:0 0 12px rgba(255,59,59,.45),0 6px 18px rgba(0,0,0,.5);} 50%{ box-shadow:0 0 26px rgba(255,59,59,.85),0 6px 18px rgba(0,0,0,.5);} }
+  .sideToggle {
+    position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+    width: 48px; height: 48px; border-radius: 14px; border: 1px solid var(--line2);
+    background: rgba(255,255,255,.05); color: var(--white); font-size: 20px; display: flex; align-items: center; justify-content: center; cursor: pointer;
+    backdrop-filter: var(--glass); box-shadow: var(--shadow);
+  }
+  .sideToggle:active { background: rgba(255,255,255,.14); }
+  .auxBtn {
+    position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+    height: 48px; padding: 0 14px; border-radius: 14px; border: 1px solid var(--line2);
+    background: rgba(255,255,255,.05); color: var(--white); font-size: 13px; display: flex; align-items: center; justify-content: center; cursor: pointer; gap: 6px;
+    backdrop-filter: var(--glass); box-shadow: var(--shadow);
+  }
+  .auxBtn:active { background: rgba(255,255,255,.14); }
+  .auxBtn[disabled] { opacity: .3; pointer-events: none; }
+  .recDot { width: 12px; height: 12px; border-radius: 50%; background: var(--red); }
+
+  /* 侧边栏（玻璃质感） */
+  #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); backdrop-filter: blur(2px); z-index: 40; display: none; }
+  #overlay.show { display: block; }
+  #sidebar {
+    position: fixed; top: 0; right: 0; height: 100%; width: 84%; max-width: 380px;
+    background: var(--panel); z-index: 50; transform: translateX(100%); transition: transform .28s cubic-bezier(.4,0,.2,1);
+    display: flex; flex-direction: column; border-left: 1px solid var(--line2);
+    backdrop-filter: var(--glass); box-shadow: -10px 0 40px rgba(0,0,0,.6);
+  }
+  #sidebar.show { transform: translateX(0); }
+  #sidebarHeader { padding: 18px 18px 12px; font-size: 17px; font-weight: 700; color: #fff; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); }
+  #sidebarHeader .close { font-size: 22px; cursor: pointer; color: var(--muted); width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; border-radius: 10px; }
+  #sidebarHeader .close:active { background: rgba(255,255,255,.1); }
+  #sidebarBody { padding: 12px; overflow-y: auto; flex: 1; }
+  .menuItem {
+    padding: 15px 14px; margin-bottom: 9px; background: rgba(255,255,255,.05); border: 1px solid var(--line);
+    border-radius: 14px; color: var(--white); font-size: 14px; cursor: pointer; display: flex; align-items: center; gap: 12px;
+    transition: background .15s, transform .08s; box-shadow: 0 2px 10px rgba(0,0,0,.3);
+  }
+  .menuItem:active { background: rgba(255,224,0,.12); transform: scale(.98); }
+  .menuItem .ic { font-size: 19px; width: 24px; text-align: center; }
+  .menuTitle { font-size: 11px; color: var(--muted); margin: 16px 4px 8px; text-transform: uppercase; letter-spacing: 1.5px; }
+  .sessItem { padding: 11px 13px; background: rgba(255,255,255,.04); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 7px; font-size: 12px; color: var(--text); display: flex; justify-content: space-between; align-items: center; }
+  .sessItem:active { background: rgba(255,255,255,.1); }
+  .sessItem .nm { color: #fff; }
+  .sessItem .meta { color: var(--muted); font-size: 10px; margin-top: 2px; }
+  .sessItem .del { color: var(--red); padding: 5px 9px; border-radius: 8px; background: rgba(255,59,59,.1); }
+
+  /* 模态框（玻璃质感） */
+  #modalRoot { position: fixed; inset: 0; z-index: 60; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.55); backdrop-filter: blur(3px); }
+  #modalRoot.show { display: flex; }
+  .modal {
+    width: 86%; max-width: 350px; background: var(--panel); border: 1px solid var(--line2);
+    border-radius: 20px; padding: 22px; color: var(--text); backdrop-filter: var(--glass); box-shadow: var(--shadow);
+    animation: pop .22s cubic-bezier(.2,.9,.3,1.2);
+  }
+  @keyframes pop { from { transform: scale(.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+  .modal h3 { color: #fff; font-size: 17px; margin-bottom: 12px; }
+  .modal p { font-size: 13px; line-height: 1.6; margin-bottom: 16px; color: var(--muted); }
+  .modal .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .mbtn {
+    flex: 1 1 auto; min-width: 120px; padding: 13px; border-radius: 14px; border: 1px solid var(--line2);
+    background: rgba(255,255,255,.06); color: #fff; font-size: 14px; cursor: pointer; text-align: center; transition: transform .08s, background .15s;
+  }
+  .mbtn.primary { background: var(--yellow); color: #000; border-color: var(--yellow); font-weight: 700; box-shadow: var(--glow-y); }
+  .mbtn.blue { background: var(--blue); color: #000; border-color: var(--blue); font-weight: 700; }
+  .mbtn:active { transform: scale(.96); background: rgba(255,255,255,.14); }
+  .fmtSel { display: flex; flex-direction: column; gap: 9px; margin: 6px 0 16px; }
+  .fmtSel label { display: flex; align-items: center; gap: 9px; font-size: 13px; padding: 10px 12px; background: rgba(255,255,255,.05); border-radius: 12px; border: 1px solid var(--line); }
+  .fmtSel input { accent-color: var(--yellow); width: 16px; height: 16px; }
+
+  /* Toast（玻璃质感气泡） */
+  #toast { position: fixed; left: 50%; bottom: 17%; transform: translateX(-50%); background: rgba(10,10,12,.88); color: #fff; border: 1px solid var(--line2); padding: 10px 18px; border-radius: 22px; font-size: 13px; z-index: 80; opacity: 0; transition: opacity .25s, transform .25s; pointer-events: none; max-width: 82%; text-align: center; backdrop-filter: var(--glass); box-shadow: var(--shadow); }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(-4px); }
+
+  /* 首次进入的非阻塞提示条（不覆盖频谱区，可随时滑动） */
+  #onboardBar {
+    position: fixed; left: 8px; right: 8px; bottom: 16%; z-index: 45;
+    background: rgba(14,14,18,.94); border: 1px solid var(--line2); border-radius: 16px;
+    padding: 10px 12px; display: flex; align-items: center; gap: 8px;
+    backdrop-filter: var(--glass); box-shadow: var(--shadow);
+    animation: slideUp .3s ease; max-width: 420px; margin: 0 auto;
+  }
+  @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  #onboardBar .obText { flex: 1 1 auto; font-size: 12px; line-height: 1.5; color: var(--text); }
+  #onboardBar .obBtns { display: flex; gap: 6px; flex: 0 0 auto; }
+  #onboardBar .obBtn {
+    padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line2);
+    background: rgba(255,255,255,.06); color: #fff; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  #onboardBar .obBtn.primary { background: var(--yellow); color: #000; border-color: var(--yellow); font-weight: 700; }
+
+  /* 在线/离线状态徽标 */
+  #netBadge {
+    position: fixed; top: 6px; right: 8px; z-index: 60;
+    font-size: 11px; padding: 3px 8px; border-radius: 8px;
+    background: rgba(255,224,0,.15); color: var(--yellow);
+    border: 1px solid rgba(255,224,0,.35); pointer-events: none;
+    opacity: 0; transform: translateY(-6px); transition: opacity .25s, transform .25s;
+  }
+  #netBadge.show { opacity: 1; transform: translateY(0); }
+
+  .hidden { display: none !important; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- 顶部波形区 -->
+  <div id="waveformWrap">
+    <canvas id="wave"></canvas>
+    <div id="waveHint">音量 / 波形</div>
+  </div>
+
+  <!-- 主频谱区 -->
+  <div id="spectrumWrap">
+    <div id="noteAxis"><div id="noteAxisInner"></div></div>
+    <div id="scrollArea">
+      <div id="specContent">
+        <canvas id="spectrum"></canvas>
+      </div>
+    </div>
+    <div id="emptyHint">
+        <div>点击下方麦克风开始录音<br>实时检测你的人声音高<br><span style="font-size:11px;color:var(--muted)">上下滑动可查看完整音域（C1–C8）</span></div>
+    </div>
+    <div id="notePopup"></div>
+    <!-- 多轨对比面板 -->
+    <div id="comparePanel"></div>
+  </div>
+
+  <!-- 底部控制栏 -->
+  <div id="controls">
+    <div class="sideToggle" id="sideToggle" title="功能菜单">☰</div>
+    <button class="ctrlBtn" id="micBtn" title="录音">●</button>
+    <button class="auxBtn" id="playBtn" disabled title="播放">▶ 播放</button>
+  </div>
+</div>
+
+<!-- 侧边栏 -->
+<div id="overlay"></div>
+<div id="sidebar">
+  <div id="sidebarHeader"><span>工作台</span><span class="close" id="sideClose">✕</span></div>
+  <div id="sidebarBody">
+    <div class="menuItem" id="miInstall" style="display:none"><span class="ic">📲</span><span>安装到手机桌面</span></div>
+    <div class="menuItem" id="miPerm"><span class="ic">🔐</span><span>权限中心（麦克风 / 存储）</span></div>
+    <div class="menuItem" id="miSound"><span class="ic">🔊</span><span>气泡音效：<b id="soundState">开</b></span></div>
+    <div class="menuTitle">录音 / 对比</div>
+    <div class="menuItem" id="miOverlay"><span class="ic">⧉</span><span>叠加录制（两段对比）</span></div>
+    <div class="menuItem" id="miImport"><span class="ic">📂</span><span>导入多文件对比</span></div>
+    <div class="menuItem" id="miSave"><span class="ic">💾</span><span>保存录音</span></div>
+    <div class="menuTitle">数据</div>
+    <div class="menuItem" id="miExport"><span class="ic">⬇</span><span>导出 JSON 备份</span></div>
+    <div class="menuItem" id="miImportJson"><span class="ic">⬆</span><span>导入 JSON 备份</span></div>
+    <div class="menuTitle">已保存录音</div>
+    <div id="sessList"></div>
+    <div class="menuItem" id="miClear" style="border-color:var(--red);color:var(--red)"><span class="ic">🗑</span><span>清空本地存储</span></div>
+  </div>
+</div>
+
+<!-- 模态框 -->
+<div id="modalRoot">
+  <div class="modal" id="modalBox"></div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<input type="file" id="fileInput" accept="audio/*" multiple>
+<input type="file" id="jsonInput" accept="application/json,.json">
+
+<script>
+"use strict";
+/* ====================== 常量与工具 ====================== */
+const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const MIN_MIDI = 24;   // C1
+const MAX_MIDI = 108;  // C8
+const SEMI_COUNT = MAX_MIDI - MIN_MIDI; // 84 个半音
+const PX_PER_SEC = 70; // 时间方向基准像素/秒（实际会按时长自适应收缩）
+const TRACK_COLORS = ["#ffe000","#ffffff","#7ec8ff","#ff9a3c","#ff2d2d","#ff7ad9","#8a2be2"];
+const LARGE_FILE = 15 * 1024 * 1024; // 15MB
+// 无上限录制：不设硬上限，每 60 秒自动分段存储防内存溢出
+const SEGMENT_SECONDS = 60;
+
+function freqToMidi(f){ return 69 + 12 * Math.log2(f / 440); }
+function midiToFreq(m){ return 440 * Math.pow(2, (m - 69) / 12); }
+function midiToNote(m){
+  m = Math.round(m);
+  const name = NOTE_NAMES[((m % 12) + 12) % 12];
+  const octave = Math.floor(m / 12) - 1;
+  return name + octave;
+}
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function fmtTime(s){ const m = Math.floor(s/60); const sec = (s%60); return (m>0? m+":" : "") + sec.toFixed(1).padStart(m>0?4:3,"0"); }
+
+/* 自相关音高检测（Chris Wilson 思路，针对人声基频） */
+function autoCorrelate(buf, sampleRate){
+  let SIZE = buf.length;
+  let rms = 0;
+  for (let i=0;i<SIZE;i++) rms += buf[i]*buf[i];
+  rms = Math.sqrt(rms / SIZE);
+  if (rms < 0.008) return -1; // 太安静
+  let r1 = 0, r2 = SIZE - 1, thres = 0.2;
+  for (let i=0;i<SIZE/2;i++){ if (Math.abs(buf[i]) < thres){ r1 = i; break; } }
+  for (let i=1;i<SIZE/2;i++){ if (Math.abs(buf[SIZE-i]) < thres){ r2 = SIZE-i; break; } }
+  buf = buf.subarray ? buf.subarray(r1, r2) : buf.slice(r1, r2);
+  SIZE = buf.length;
+  if (SIZE < 2) return -1;
+  const c = new Float32Array(SIZE);
+  for (let i=0;i<SIZE;i++){
+    let sum = 0;
+    for (let j=0;j<SIZE-i;j++) sum += buf[j]*buf[j+i];
+    c[i] = sum;
+  }
+  let d = 0; while (d < SIZE-1 && c[d] > c[d+1]) d++;
+  let maxval = -1, maxpos = -1;
+  for (let i=d;i<SIZE;i++){ if (c[i] > maxval){ maxval = c[i]; maxpos = i; } }
+  if (maxpos <= 0) return -1;
+  let T0 = maxpos;
+  const x1 = c[T0-1] || 0, x2 = c[T0], x3 = c[T0+1] || 0;
+  const a = (x1 + x3 - 2*x2) / 2, b = (x3 - x1) / 2;
+  if (a && !isNaN(a)) T0 = T0 - b / (2*a);
+  const freq = sampleRate / T0;
+  if (freq < 60 || freq > 2000) return -1;
+  return freq;
+}
+
+/* ====================== 全局状态 ====================== */
+const state = {
+  mode: "idle",            // idle | recording | playing
+  tracks: [],              // 当前显示的所有音轨
+  activeTrackIdx: 0,       // 当前录制写入的轨道
+  compareMode: false,      // 多文件对比 / 叠加对比
+  recording: null,         // 录制上下文
+  audioCtx: null,
+};
+
+/* ====================== DOM ====================== */
+const $ = (id) => document.getElementById(id);
+const waveCanvas = $("wave"), waveCtx = waveCanvas.getContext("2d");
+const specCanvas = $("spectrum"), specCtx = specCanvas.getContext("2d");
+const noteAxis = $("noteAxis"), noteAxisInner = $("noteAxisInner"), scrollArea = $("scrollArea"), specContent = $("specContent");
+const emptyHint = $("emptyHint"), comparePanel = $("comparePanel");
+const notePopup = $("notePopup"), toastEl = $("toast");
+let SEMI_PX = 28; // 每个半音在频谱纵向的像素（自适应）
+
+/* ====================== 画布尺寸 ====================== */
+let DPR = Math.min(window.devicePixelRatio || 1, 2);
+function resizeCanvases(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  const ww = waveCanvas.clientWidth, wh = waveCanvas.clientHeight;
+  waveCanvas.width = ww * DPR; waveCanvas.height = wh * DPR;
+
+  const sh = scrollArea.clientHeight;
+  // 纵向：内容高度 = 可视高度 × 3（约 1/3 可见），用户可上下滑动看全音域 C1–C8
+  const contentH = Math.max(sh * 3, SEMI_COUNT * 12);
+  SEMI_PX = contentH / SEMI_COUNT;
+  // 横向：像素/秒自适应，保证长时间录制总宽不超过画布上限
+  const maxT = currentMaxTime();
+  const px = Math.min(PX_PER_SEC, 16000 / Math.max(maxT, 1));
+  state.px = Math.max(px, 6);
+  const contentW = Math.max(scrollArea.clientWidth, maxT * state.px + 60);
+
+  specContent.style.width = contentW + "px";
+  specContent.style.height = contentH + "px";
+  noteAxisInner.style.height = contentH + "px";
+  // 频谱画布：纵向 DPR=1（避免总高过大），横向按自适应像素
+  specCanvas.style.width = contentW + "px";
+  specCanvas.style.height = contentH + "px";
+  specCanvas.width = contentW;   // DPR=1
+  specCanvas.height = contentH;
+
+  if (!state.scrolledInit){
+    state.scrolledInit = true;
+    centerOnC4();
+  }
+  buildNoteAxis();
+  drawSpectrum();
+}
+// 自动定位到人声区（C4 附近居中），C1–C8 全音域仍在画布上可滑动查看
+function centerOnC4(){
+  const sh = scrollArea.clientHeight;
+  const yC4 = (MAX_MIDI - 60) * SEMI_PX;
+  scrollArea.scrollTop = Math.max(0, yC4 - sh / 2);
+  noteAxis.scrollTop = scrollArea.scrollTop;
+}
+function currentMaxTime(){
+  let t = 8;
+  for (const tr of state.tracks){
+    if (tr.points.length) t = Math.max(t, tr.points[tr.points.length-1].t + (tr.offset||0) + 0.5);
+    if (tr.duration) t = Math.max(t, tr.duration + (tr.offset||0));
+  }
+  return t;
+}
+// 录制增长时横向自适应：像素/秒随时间收缩，画布宽度不超上限
+function resizeForGrowingTime(t){
+  // 兼容传入 track 对象或时间数值，防 NaN
+  if (t && typeof t === "object") t = t.currentTime || (t.startTime != null ? (performance.now() - t.startTime) / 1000 : 0);
+  t = Number(t); if (!isFinite(t) || t < 0) t = 0;
+  const newMax = Math.max(currentMaxTime(), t + 2);
+  const px = Math.max(6, Math.min(PX_PER_SEC, 16000 / newMax));
+  if (!isFinite(px) || px <= 0) return;
+  if (state.px && Math.abs(px - state.px) / state.px < 0.05) return; // 变化小于 5% 才重排，避免抖动
+  state.px = px;
+  const contentW = Math.max(scrollArea.clientWidth, Math.round(newMax * state.px + 60));
+  if (!isFinite(contentW) || contentW <= 0) return;
+  specContent.style.width = contentW + "px";
+  specCanvas.style.width = contentW + "px";
+  specCanvas.width = contentW;
+  // 自动跟随最新录制位置
+  if (state.followRec) scrollArea.scrollLeft = Math.max(0, contentW - scrollArea.clientWidth);
+}
+
+/* ====================== 音名纵轴 ====================== */
+function buildNoteAxis(){
+  noteAxisInner.innerHTML = "";
+  for (let m = MAX_MIDI; m >= MIN_MIDI; m--){
+    const label = document.createElement("div");
+    label.className = "noteLabel" + (NOTE_NAMES[((m%12)+12)%12] === "C" ? " isC" : "");
+    label.style.top = ((MAX_MIDI - m) * SEMI_PX) + "px";
+    label.textContent = midiToNote(m);
+    label.dataset.midi = m;
+    label.addEventListener("click", () => { sfxBubble("tick"); showNoteHz(m); });
+    noteAxisInner.appendChild(label);
+  }
+}
+function midiToY(m){ return (MAX_MIDI - m) * SEMI_PX; }
+function yToMidi(y){ return MAX_MIDI - y / SEMI_PX; }
+
+function showNoteHz(midi){
+  const note = midiToNote(midi);
+  const f = midiToFreq(midi);
+  notePopup.innerHTML = note + " = " + f.toFixed(2) + " Hz" + "<small>A4 = 440Hz 基准</small>";
+  notePopup.classList.add("show");
+  clearTimeout(showNoteHz._t);
+  showNoteHz._t = setTimeout(() => notePopup.classList.remove("show"), 2500);
+  // 高亮被点击音名
+  document.querySelectorAll(".noteLabel").forEach(el=>{
+    el.classList.toggle("hot", Number(el.dataset.midi) === midi);
+  });
+  clearTimeout(showNoteHz._t2);
+  showNoteHz._t2 = setTimeout(()=> document.querySelectorAll(".noteLabel").forEach(el=>el.classList.remove("hot")), 2500);
+}
+
+/* ====================== 频谱绘制 ====================== */
+function drawSpectrum(){
+  const w = specCanvas.width, h = specCanvas.height;
+  if (!w || !h) return; // 尺寸异常时跳过，避免 IndexSizeError 且不擦除已有内容
+  specCtx.clearRect(0,0,w,h);
+  specCtx.fillStyle = "#000"; specCtx.fillRect(0,0,w,h);
+
+  // 横向参考线（音高，每段半音）——浅灰色，确保黑底上清晰可见
+  for (let m = MIN_MIDI; m <= MAX_MIDI; m++){
+    const y = midiToY(m);
+    const isC = NOTE_NAMES[((m%12)+12)%12] === "C";
+    const isSharp = NOTE_NAMES[((m%12)+12)%12].indexOf("#") === 0;
+    // C 为主参考线（最亮），变化音稍暗，其余为常规浅灰线
+    specCtx.strokeStyle = isC ? "rgba(215,215,225,.75)" : (isSharp ? "rgba(150,150,165,.34)" : "rgba(175,175,190,.52)");
+    specCtx.lineWidth = isC ? 1.4 : 1;
+    specCtx.beginPath(); specCtx.moveTo(0, y); specCtx.lineTo(w, y); specCtx.stroke();
+  }
+  // 纵向参考线（时间）
+  const maxT = currentMaxTime();
+  specCtx.fillStyle = "#8a8a96"; specCtx.font = "10px sans-serif";
+  specCtx.textBaseline = "bottom";
+  for (let s = 0; s <= maxT; s += 1){
+    const x = s * state.px;
+    specCtx.strokeStyle = (s % 5 === 0) ? "rgba(140,140,155,.42)" : "rgba(120,120,135,.18)";
+    specCtx.lineWidth = (s % 5 === 0) ? 1 : 0.6;
+    specCtx.beginPath(); specCtx.moveTo(x, 0); specCtx.lineTo(x, h); specCtx.stroke();
+    if (s % 2 === 0){
+      specCtx.fillText(s + "s", x + 3, h - 3);
+    }
+  }
+
+  // 各轨道音高线（高光彩色线条）——加粗+双层描边，黑底上极醒目
+  for (const tr of state.tracks){
+    if (tr.points.length < 2) continue;
+    const path = new Path2D();
+    let started = false;
+    for (const p of tr.points){
+      const x = (p.t + (tr.offset||0)) * state.px;
+      const y = midiToY(p.midi);
+      if (!started){ path.moveTo(x, y); started = true; }
+      else path.lineTo(x, y);
+    }
+    specCtx.save();
+    specCtx.lineJoin = "round"; specCtx.lineCap = "round";
+    // ① 外层彩色光晕（最醒目）
+    specCtx.shadowColor = tr.color; specCtx.shadowBlur = 14;
+    specCtx.strokeStyle = tr.color; specCtx.lineWidth = 3.6;
+    specCtx.stroke(path);
+    // ② 中层亮色实线（提高饱和度与亮度）
+    specCtx.shadowBlur = 6;
+    specCtx.strokeStyle = lighten(tr.color, 0.35); specCtx.lineWidth = 2.2;
+    specCtx.stroke(path);
+    // ③ 内层白色高光芯线（让线条"发光"）
+    specCtx.shadowBlur = 0;
+    specCtx.strokeStyle = "rgba(255,255,255,.85)"; specCtx.lineWidth = 0.9;
+    specCtx.stroke(path);
+    specCtx.restore();
+    // 高亮描边（点击列表时）
+    if (tr.highlight){
+      specCtx.save();
+      specCtx.lineJoin = "round"; specCtx.lineCap = "round";
+      specCtx.shadowColor = "rgba(255,224,0,.95)"; specCtx.shadowBlur = 16;
+      specCtx.strokeStyle = "rgba(255,224,0,.95)"; specCtx.lineWidth = 5.5;
+      specCtx.stroke(path);
+      specCtx.restore();
+    }
+  }
+}
+// 将颜色提亮（amount 0~1），用于让线条更亮
+function lighten(hex, amount){
+  try {
+    let c = hex.replace("#","");
+    if (c.length === 3) c = c.split("").map(x=>x+x).join("");
+    const r = parseInt(c.slice(0,2),16), g = parseInt(c.slice(2,4),16), b = parseInt(c.slice(4,6),16);
+    const f = (v) => Math.min(255, Math.round(v + (255 - v) * amount));
+    return "rgb(" + f(r) + "," + f(g) + "," + f(b) + ")";
+  } catch(e){ return hex; }
+}
+
+/* ====================== 实时波形 ====================== */
+function drawWave(buf){
+  const w = waveCanvas.width, h = waveCanvas.height;
+  waveCtx.clearRect(0,0,w,h);
+  waveCtx.fillStyle = "#050505"; waveCtx.fillRect(0,0,w,h);
+  if (!buf) return;
+  waveCtx.strokeStyle = "#ffe000"; waveCtx.lineWidth = 1.5 * DPR; waveCtx.beginPath();
+  const slice = w / buf.length;
+  for (let i=0;i<buf.length;i++){
+    const v = buf[i] * 0.9;
+    const y = (h/2) + v * h/2;
+    const x = i * slice;
+    if (i===0) waveCtx.moveTo(x,y); else waveCtx.lineTo(x,y);
+  }
+  waveCtx.stroke();
+}
+
+/* ====================== 音频上下文 ====================== */
+function getCtx(){
+  if (!state.audioCtx) state.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (state.audioCtx.state === "suspended") state.audioCtx.resume();
+  return state.audioCtx;
+}
+
+/* ====================== 气泡音效（实时合成，无外部文件） ====================== */
+let soundOn = true;
+function sfxBubble(kind){
+  if (!soundOn) return;
+  try {
+    const ctx = getCtx();
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = "sine";
+    let f0 = 520, f1 = 880, dur = 0.12, vol = 0.16;
+    if (kind === "send"){ f0 = 440; f1 = 1180; dur = 0.17; vol = 0.2; }   // 发送：明亮上扬
+    else if (kind === "open"){ f0 = 360; f1 = 720; dur = 0.14; }          // 切标签：开
+    else if (kind === "close"){ f0 = 680; f1 = 320; dur = 0.12; }         // 切标签：关
+    else if (kind === "tick"){ f0 = 760; f1 = 760; dur = 0.05; vol = 0.1; } // 轻提示
+    else if (kind === "rec"){ f0 = 300; f1 = 900; dur = 0.15; vol = 0.18; }
+    else if (kind === "stop"){ f0 = 900; f1 = 300; dur = 0.13; }
+    osc.frequency.setValueAtTime(f0, t);
+    osc.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(g).connect(ctx.destination);
+    osc.start(t); osc.stop(t + dur + 0.03);
+  } catch(e){}
+}
+
+/* ====================== 权限通道（麦克风 / 存储） ====================== */
+// 麦克风只在安全上下文可用：https / localhost / 127.0.0.1（file:// 不算，getUserMedia 通常为 undefined）
+function isSecure(){
+  const host = location.hostname;
+  return !!(window.isSecureContext && (location.protocol === "https:" || host === "localhost" || host === "127.0.0.1" || host === "::1"));
+}
+function protoLabel(){
+  if (location.protocol === "file:") return "file:// 本地文件";
+  return location.protocol + "//" + location.host;
+}
+// 检测常见的「内置浏览器」——微信/QQ/钉钉/微博等常屏蔽或限制麦克风
+function inAppBrowser(){
+  const ua = navigator.userAgent || "";
+  if (/MicroMessenger/i.test(ua)) return "微信内置浏览器";
+  if (/QQ\//i.test(ua) || /QQBrowser/i.test(ua)) return "QQ 内置浏览器";
+  if (/DingTalk/i.test(ua)) return "钉钉内置浏览器";
+  if (/Weibo/i.test(ua)) return "微博内置浏览器";
+  if (/AlipayClient/i.test(ua)) return "支付宝内置浏览器";
+  if (/baiduboxapp/i.test(ua)) return "百度内置浏览器";
+  return "";
+}
+async function queryMicState(){
+  try { const st = await navigator.permissions.query({ name: "microphone" }); return st.state; }
+  catch(e){ return "unknown"; }
+}
+// 诊断：把任意异常翻译成可操作的错误码
+function classifyMicError(err){
+  const name = err && err.name || "";
+  if (name === "NotAllowedError" || name === "PermissionDeniedError") return "DENIED";
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") return "NODEVICE";
+  if (name === "NotReadableError" || name === "TrackStartError") return "BUSY";
+  if (name === "OverconstrainedError" || name === "ConstraintNotSatisfiedError") return "CONSTRAINT";
+  if (name === "SecurityError") return "INSECURE";
+  if (name === "AbortError") return "ABORT";
+  return "UNKNOWN";
+}
+// 主动请求麦克风：带降级链（严格约束 → 宽松约束 → 最简 audio:true）
+// 注意：不再用 permissions.query 的结果做「预判拦截」——它在部分浏览器（含 iOS Safari、
+// 部分 Android Chrome）会返回陈旧或错误的状态，导致「明明已授权却被判为 denied」。
+// 权限判定一律交给 getUserMedia 本身。
+async function requestMic(){
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+    throw { code: "UNSUPPORTED", msg: "当前环境未提供 navigator.mediaDevices.getUserMedia（协议：" + protoLabel() + "）" };
+  if (!isSecure())
+    throw { code: "INSECURE" };
+
+  // 约束降级链：先要原始信号（利于音高检测），失败再逐步放宽
+  const constraints = [
+    { audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false } },
+    { audio: { echoCancellation:false } },
+    { audio: true }   // 你贴的最简形式，作为最终兜底
+  ];
+  let lastErr = null;
+  for (const c of constraints){
+    try {
+      return await navigator.mediaDevices.getUserMedia(c);
+    } catch(err){
+      lastErr = err;
+      const code = classifyMicError(err);
+      // 权限类错误无需继续降级，直接抛出
+      if (code === "DENIED" || code === "INSECURE") throw { code, err, msg: err.message };
+      // 设备不存在也无需继续
+      if (code === "NODEVICE") throw { code, err, msg: err.message };
+      // 其余（约束/占用/未知）尝试下一个更宽松的约束
+    }
+  }
+  throw { code: classifyMicError(lastErr), err: lastErr, msg: lastErr && lastErr.message };
+}
+// 精确错误诊断：按错误码给出可操作指引
+function showPermGuide(code, rawMsg){
+  let title = "需要麦克风权限", body = "";
+  const app = inAppBrowser();
+  if (code === "DENIED"){
+    title = "麦克风权限被拒绝";
+    if (app){
+      // 内置浏览器是最常见的「授权后仍被拒」原因
+      body = "检测到你正在 <b>" + app + "</b> 中打开本页。<br><br>微信 / QQ / 钉钉等<b>内置浏览器通常禁止网页直接使用麦克风</b>，即使你点了「允许」也会失败。<br><br>请改用：<br>① 点击右上角「⋯」→<b>在浏览器打开</b>（用手机系统浏览器 Chrome / Safari）；<br>② 或直接把链接复制到系统浏览器打开。";
+    } else {
+      body = "浏览器已记住「拒绝」，无法再次自动弹窗。<br><br>请手动开启：<br>① 点击地址栏左侧的 <b>锁形 / 信息图标</b><br>② 进入「网站设置 / 权限」<br>③ 找到「麦克风」改为<b>允许</b><br>④ 返回并刷新本页面<br><br>若已显示「允许」仍失败，可能是<b>系统级</b>限制：请在手机「设置 → 应用 → 浏览器 → 权限」中开启麦克风。";
+    }
+  } else if (code === "INSECURE" || code === "UNSUPPORTED"){
+    title = "当前环境无法使用麦克风";
+    body = "当前地址：<b>" + protoLabel() + "</b>" + (app ? "（" + app + "）" : "") + "<br><br>浏览器只在 <b>https</b> 或 <b>localhost</b> 下允许麦克风；直接以 <b>file://</b> 打开或非 https 域名时，<code>navigator.mediaDevices</code> 会不可用。<br><br>解决：<br>① 把本文件部署到 https 静态托管（GitHub Pages / Vercel / Netlify）；<br>② 或本地起服务用 <b>http://localhost</b> 访问（如 <code>npx serve</code> / <code>python -m http.server</code>）；<br>③ 或装入安装包（Capacitor 安卓包 / 微信小程序）后用原生权限。";
+  } else if (code === "NODEVICE"){
+    title = "未检测到麦克风";
+    body = "系统没有可用的音频输入设备。<br><br>请检查：<br>① 设备是否插好麦克风/耳机；<br>② 系统「声音 / 输入设备」中是否有可用设备；<br>③ 换一个浏览器或重启设备后重试。";
+  } else if (code === "BUSY"){
+    title = "麦克风被占用";
+    body = "另一个程序（或多标签页）正在使用麦克风。<br><br>请关闭正在占用麦克风的程序（会议、录音、直播软件等），关闭本页的其它标签页，然后重试。";
+  } else if (code === "CONSTRAINT"){
+    title = "麦克风参数不兼容";
+    body = "当前设备不支持所选音频参数。程序已自动尝试放宽参数，若仍失败请点击「重试授权」，或改用其它浏览器。";
+  } else {
+    title = "麦克风启动失败";
+    body = "请点击「重试授权」再次尝试。" + (rawMsg ? "<br><br><small style='color:var(--muted)'>错误信息：" + rawMsg + "</small>" : "");
+  }
+  openModal(`<h3>${title}</h3><p>${body}</p>
+    <div class="row"><button class="mbtn primary" id="pgRetry">重试授权</button><button class="mbtn" id="pgClose">我知道了</button></div>`);
+  $("pgRetry").onclick = async () => {
+    closeModal();
+    try { const s = await requestMic(); s.getTracks().forEach(t=>t.stop()); toast("麦克风已授权"); }
+    catch(e){ showPermGuide(e && e.code, e && e.msg); }
+  };
+  $("pgClose").onclick = closeModal;
+}
+// 存储（localStorage）可用性探针
+function initStorage(){
+  try { localStorage.setItem("__probe__", "1"); localStorage.removeItem("__probe__"); return true; }
+  catch(e){ return false; }
+}
+// 下载：支持时走 File System Access（真实「选择保存位置」存储通道）
+async function saveWithPicker(blob, filename){
+  if (window.showSaveFilePicker){
+    try {
+      const handle = await window.showSaveFilePicker({ suggestedName: filename });
+      const w = await handle.createWritable();
+      await w.write(blob); await w.close();
+      return true;
+    } catch(e){ if (e && e.name === "AbortError") return false; /* 其它情况回退 */ }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2500);
+  return true;
+}
+
+// 权限中心：展示麦克风 / 存储状态，并提供主动授权通道
+async function openPermCenter(){
+  const micState = await queryMicState();
+  const storeOk = initStorage();
+  const secure = isSecure();
+  const pill = s => s === "granted" ? '<span style="color:#5dff8f">● 已授权</span>'
+    : s === "denied" ? '<span style="color:var(--red)">● 已拒绝</span>'
+    : s === "prompt" ? '<span style="color:var(--yellow)">● 未请求</span>'
+    : '<span style="color:var(--muted)">● 未知</span>';
+  openModal(`
+    <h3>🔐 权限中心</h3>
+    <p style="margin-bottom:10px;font-size:11px;color:var(--muted)">当前地址：${protoLabel()} · 安全上下文：${secure ? '<span style="color:#5dff8f">是</span>' : '<span style="color:var(--red)">否</span>'}</p>
+    ${secure ? "" : '<p style="margin-bottom:10px;color:var(--red);font-size:12px">⚠ 非安全环境，麦克风无法授权。请用 https 或 localhost 打开（详见下方提示）。</p>'}
+    <div style="background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><b>🎤 麦克风</b><br><small style="color:var(--muted)">用于实时音高检测</small></div>
+        <div id="permMicState">${pill(micState)}</div>
+      </div>
+      <button class="mbtn primary" id="permMicBtn" style="margin-top:10px">请求麦克风权限</button>
+    </div>
+    <div style="background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><b>💾 本地存储</b><br><small style="color:var(--muted)">保存录音与 JSON 备份</small></div>
+        <div>${storeOk ? '<span style="color:#5dff8f">● 可用</span>' : '<span style="color:var(--red)">● 不可用（隐私模式？）</span>'}</div>
+      </div>
+      <button class="mbtn" id="permStoreBtn" style="margin-top:10px">检测 / 初始化存储</button>
+    </div>
+    <div class="row">
+      <button class="mbtn" id="permDiag">复制诊断信息</button>
+      <button class="mbtn" id="permClose">关闭</button>
+    </div>`);
+  $("permMicBtn").onclick = async () => {
+    try {
+      const s = await requestMic();
+      s.getTracks().forEach(t => t.stop());
+      sfxBubble("send");
+      $("permMicState").innerHTML = pill("granted");
+      toast("麦克风已授权");
+    } catch(e){
+      $("permMicState").innerHTML = pill("denied");
+      showPermGuide(e && e.code, e && e.msg);
+    }
+  };
+  $("permDiag").onclick = () => {
+    const diag = [
+      "地址: " + protoLabel(),
+      "安全上下文: " + (isSecure() ? "是" : "否"),
+      "isSecureContext: " + !!window.isSecureContext,
+      "内置浏览器: " + (inAppBrowser() || "否"),
+      "mediaDevices: " + !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+      "权限状态: " + micState,
+      "UA: " + navigator.userAgent
+    ].join("\n");
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(diag).then(() => toast("诊断信息已复制，可发给我排查")).catch(() => openModal(`<h3>诊断信息</h3><p style="white-space:pre-wrap;font-size:11px;word-break:break-all">${diag}</p><div class="row"><button class="mbtn primary" id="dOk">关闭</button></div>`) || ($("dOk").onclick = closeModal));
+    } else {
+      openModal(`<h3>诊断信息</h3><p style="white-space:pre-wrap;font-size:11px;word-break:break-all">${diag}</p><div class="row"><button class="mbtn primary" id="dOk">关闭</button></div>`);
+      $("dOk").onclick = closeModal;
+    }
+  };
+  $("permStoreBtn").onclick = () => {
+    const ok = initStorage();
+    sfxBubble("tick");
+    toast(ok ? "本地存储可用" : "本地存储不可用，请关闭隐私模式后重试");
+  };
+  $("permClose").onclick = closeModal;
+}
+
+/* ====================== 录音 ====================== */
+async function startRecording(){
+  let stream;
+  try {
+    stream = await requestMic();
+  } catch(err){
+    if (err && err.code) showPermGuide(err.code, err.msg);
+    else toast("无法访问麦克风：" + (err && err.message || err));
+    return;
+  }
+  try {
+    const ctx = getCtx();
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser);
+
+    const mime = pickRecorderMime();
+    const mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    const chunks = [];
+    mr.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+
+    const track = state.tracks[state.activeTrackIdx];
+    track.startTime = performance.now();
+    track.points = [];
+    track.stream = stream; track.analyser = analyser; track.recorder = mr; track.source = source;
+
+    const timeBuf = new Float32Array(analyser.fftSize);
+    emptyHint.classList.add("hidden");
+    comparePanel.classList.toggle("show", state.compareMode);
+
+    // 无上限录制：用 timeslice 每 1 秒落一片，自动分段存储防内存溢出
+    mr.start(1000);
+    state.mode = "recording";
+    state.followRec = true;
+    micBtn.classList.add("rec"); micBtn.textContent = "■";
+    playBtn.disabled = true;
+
+    let lastPoint = 0, lastDraw = 0, lastSeg = -1;
+    function loop(){
+      if (state.mode !== "recording") return;
+      const now = performance.now();
+      const t = (now - track.startTime) / 1000;
+      analyser.getFloatTimeDomainData(timeBuf);
+      drawWave(timeBuf);
+      // 分段提示（每 60 秒）：录音数据已由 MediaRecorder 分片，不会一次性占满内存
+      const seg = Math.floor(t / SEGMENT_SECONDS);
+      if (seg !== lastSeg && seg > 0){
+        lastSeg = seg;
+        track.segments = seg + 1;
+        toast("已录制 " + Math.floor(t) + "s（第 " + (seg + 1) + " 段）");
+      }
+      const f = autoCorrelate(timeBuf, ctx.sampleRate);
+      if (f > 0 && now - lastPoint > 60){ // 约 16Hz 采样，节省存储与绘制
+        lastPoint = now;
+        track.points.push({ t, f, midi: freqToMidi(f), note: midiToNote(freqToMidi(f)) });
+      }
+      if (now - lastDraw > 80){ lastDraw = now; resizeForGrowingTime(track); drawSpectrum(); } // 约 12fps 自适应重绘
+      track._raf = requestAnimationFrame(loop);
+    }
+    loop();
+
+    mr.onstop = async () => {
+      const blob = new Blob(chunks, { type: mr.mimeType || "audio/webm" });
+      track.blob = blob; track.mime = mr.mimeType;
+      try {
+        const ab = await blob.arrayBuffer();
+        track.audioBuffer = await ctx.decodeAudioData(ab);
+        track.duration = track.audioBuffer.duration;
+      } catch(e){ console.warn("解码失败", e); }
+      stream.getTracks().forEach(t => t.stop());
+      drawSpectrum();
+    };
+  } catch(err){
+    toast("无法访问麦克风：" + err.message);
+  }
+}
+function pickRecorderMime(){
+  const cands = ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"];
+  for (const c of cands) if (window.MediaRecorder && MediaRecorder.isTypeSupported(c)) return c;
+  return "";
+}
+function stopRecording(){
+  const tr = state.tracks[state.activeTrackIdx];
+  if (tr && tr.recorder && tr.recorder.state !== "inactive"){
+    tr.recorder.stop();
+  }
+  state.mode = "idle";
+  state.followRec = false;
+  micBtn.classList.remove("rec"); micBtn.textContent = "●";
+  if (state.tracks.some(t => t.points.length)) playBtn.disabled = false;
+}
+
+/* ====================== 播放 ====================== */
+let playHandles = [];
+function stopAllPlayback(){
+  try { playHandles.forEach(h => { try{ h.source.stop(); }catch(e){} try{ h.gain.disconnect(); }catch(e){} }); } catch(e){}
+  playHandles = [];
+  document.querySelectorAll(".pitchLabel").forEach(el => el.remove());
+  state.mode = "idle";
+  playBtn.textContent = "▶ 播放"; playBtn.disabled = !state.tracks.some(t=>t.points.length);
+  cancelAnimationFrame(stopAllPlayback._raf);
+}
+async function playAll(){
+  if (state.mode === "playing"){ stopAllPlayback(); return; }
+  const ctx = getCtx();
+  const hasAudio = state.tracks.some(t => t.audioBuffer);
+  if (!hasAudio) toast("无音频数据，按时间轴演示音高（无声）");
+  state.mode = "playing";
+  playBtn.textContent = "■ 停止";
+  document.querySelectorAll(".pitchLabel").forEach(el => el.remove());
+
+  const startCtx = ctx.currentTime;
+  for (const tr of state.tracks){
+    if (!tr.points.length) continue;
+    if (tr.audioBuffer){
+      const src = ctx.createBufferSource();
+      src.buffer = tr.audioBuffer;
+      const gain = ctx.createGain();
+      gain.gain.value = tr.bgm ? 0.5 : 1.0;
+      src.connect(gain).connect(ctx.destination);
+      const off = tr.offset || 0;
+      src.start(0, Math.max(0, off));
+      const h = { source: src, gain, track: tr, startCtx, offset: off, ended: false, virtual: false };
+      src.onended = () => { h.ended = true; };
+      playHandles.push(h);
+    } else {
+      // 无音频：虚拟播放（按真实时间推进音高标签）
+      const off = tr.offset || 0;
+      const dur = tr.points[tr.points.length-1].t;
+      const h = { source: null, gain: null, track: tr, startCtx, offset: off, ended: false, virtual: true, duration: dur };
+      playHandles.push(h);
+    }
+  }
+  if (!playHandles.length){ state.mode="idle"; playBtn.textContent="▶ 播放"; return; }
+
+  function tick(){
+    let anyAlive = false;
+    for (const h of playHandles){
+      if (h.ended) continue;
+      const elapsed = ctx.currentTime - h.startCtx; // 从 0 开始的真实时间
+      const tPos = elapsed + h.offset;              // 频谱时间轴位置
+      updatePitchLabel(h.track, tPos, elapsed);
+      const dur = h.virtual ? (h.duration - h.offset) : (h.track.audioBuffer.duration - h.offset);
+      if (elapsed < dur + 0.05) anyAlive = true;
+    }
+    if (anyAlive && state.mode === "playing"){ stopAllPlayback._raf = requestAnimationFrame(tick); }
+    else { stopAllPlayback(); }
+  }
+  tick();
+}
+function updatePitchLabel(tr, tPos, elapsed){
+  // 找到该时间点最近的音高点
+  let pt = null;
+  const pts = tr.points;
+  if (pts.length){
+    // 二分 / 线性查找
+    let lo = 0, hi = pts.length - 1;
+    while (lo < hi){ const mid = (lo+hi)>>1; if (pts[mid].t < tPos) lo = mid+1; else hi = mid; }
+    let idx = lo;
+    if (idx > 0 && Math.abs(pts[idx].t - tPos) > Math.abs(pts[idx-1].t - tPos)) idx--;
+    pt = pts[idx];
+  }
+  let label = tr._label;
+  if (!pt || elapsed < 0){
+    if (label) label.style.display = "none";
+    return;
+  }
+  if (!label){
+    label = document.createElement("div");
+    label.className = "pitchLabel";
+    scrollArea.appendChild(label);
+    tr._label = label;
+  }
+  label.style.display = "block";
+  const x = (pt.t + (tr.offset||0)) * state.px;
+  const y = midiToY(pt.midi);
+  label.style.left = x + "px";
+  label.style.top = y + "px";
+  label.textContent = pt.note;
+  label.classList.toggle("high", pt.midi >= 72);  // C5 以上
+  label.classList.toggle("low", pt.midi < 48);    // C3 以下
+  label.style.borderColor = label.style.color = "";
+  if (pt.midi >= 72) label.style.color = "var(--yellow)";
+  else if (pt.midi < 48) label.style.color = "var(--red)";
+  else label.style.color = "#fff";
+  // 保证标签在可视范围时滚动跟随
+  const saRect = scrollArea.getBoundingClientRect();
+  if (x > scrollArea.scrollLeft + saRect.width - 40) scrollArea.scrollLeft = x - saRect.width + 60;
+}
+
+/* ====================== 离线分析音频文件 ====================== */
+async function analyzeAudioBuffer(buffer, hopOpt){
+  const data = buffer.getChannelData(0);
+  const sr = buffer.sampleRate;
+  const win = 2048, hop = hopOpt || 1024;
+  const points = [];
+  const tmp = new Float32Array(win);
+  for (let i=0; i + win <= data.length; i += hop){
+    tmp.set(data.subarray(i, i+win));
+    const f = autoCorrelate(tmp, sr);
+    if (f > 0){
+      const t = i / sr;
+      points.push({ t, f, midi: freqToMidi(f), note: midiToNote(freqToMidi(f)) });
+    }
+  }
+  return points;
+}
+
+/* ====================== 轨道管理 ====================== */
+function newTrack(name, colorIdx){
+  return {
+    id: "t" + Date.now() + Math.random().toString(36).slice(2,6),
+    name: name || "录音",
+    colorIdx: colorIdx,
+    color: TRACK_COLORS[colorIdx % TRACK_COLORS.length],
+    points: [], offset: 0, bgm: false, highlight: false,
+    blob: null, audioBuffer: null, duration: 0,
+  };
+}
+function addCompareTrackFromBuffer(name, buffer){
+  const tr = newTrack(name, state.tracks.length);
+  tr.audioBuffer = buffer;
+  tr.duration = buffer.duration;
+  // 超长音频降采样分析：>3 分钟时增大 hop，避免解析卡死
+  const dataLen = buffer.length || (buffer.getChannelData ? buffer.getChannelData(0).length : 0);
+  const maxFrames = Math.max(1, Math.floor(dataLen / 2048));
+  const hop = maxFrames > 40000 ? 4096 : 1024;
+  analyzeAudioBuffer(buffer, hop).then(pts => {
+    tr.points = pts;
+    drawSpectrum(); buildComparePanel();
+  }).catch(() => {});
+  state.tracks.push(tr);
+  return tr;
+}
+
+/* ====================== 多轨对比面板 ====================== */
+function buildComparePanel(){
+  if (!state.compareMode){ comparePanel.classList.remove("show"); return; }
+  comparePanel.innerHTML = "";
+  comparePanel.classList.add("show");
+  state.tracks.forEach((tr, i) => {
+    const row = document.createElement("div");
+    row.className = "cmpRow";
+    row.innerHTML = `
+      <div class="cmpDot" style="background:${tr.color}"></div>
+      <div class="cmpName">${tr.name}</div>
+      <div class="cmpIcon clock" data-i="${i}" title="起始时间">⏱</div>
+      <div class="cmpIcon bgm" data-i="${i}" title="BGM 降音">BGM</div>`;
+    comparePanel.appendChild(row);
+    const offWrap = document.createElement("div");
+    offWrap.className = "cmpOffsetWrap";
+    offWrap.dataset.i = i;
+    const maxOff = Math.max(10, (tr.duration||10));
+    offWrap.innerHTML = `<input type="range" min="0" max="${maxOff.toFixed(1)}" step="0.1" value="${(tr.offset||0)}">
+      <div style="font-size:10px;color:var(--muted);text-align:right">起始: <span class="offval">${(tr.offset||0).toFixed(1)}</span>s</div>`;
+    comparePanel.appendChild(offWrap);
+  });
+  // 绑定事件
+  comparePanel.querySelectorAll(".cmpName").forEach(n => {
+    n.addEventListener("click", () => focusTrack(Number(n.closest(".cmpRow").querySelector(".cmpIcon").dataset.i)));
+  });
+  comparePanel.querySelectorAll(".cmpIcon.clock").forEach(ic => {
+    ic.addEventListener("click", () => {
+      const i = Number(ic.dataset.i);
+      const wrap = comparePanel.querySelector(`.cmpOffsetWrap[data-i="${i}"]`);
+      wrap.classList.toggle("show");
+      ic.classList.toggle("on");
+      vibrate(); sfxBubble("tick");
+    });
+  });
+  comparePanel.querySelectorAll(".cmpIcon.bgm").forEach(ic => {
+    ic.addEventListener("click", () => {
+      const i = Number(ic.dataset.i);
+      state.tracks[i].bgm = !state.tracks[i].bgm;
+      ic.classList.toggle("on", state.tracks[i].bgm);
+      vibrate(); sfxBubble("tick");
+      if (state.mode === "playing"){ // 即时生效
+        const h = playHandles.find(p => p.track === state.tracks[i]);
+        if (h) h.gain.gain.value = state.tracks[i].bgm ? 0.5 : 1.0;
+      }
+    });
+  });
+  comparePanel.querySelectorAll('input[type=range]').forEach(r => {
+    r.addEventListener("input", () => {
+      const i = Number(r.closest(".cmpOffsetWrap").dataset.i);
+      state.tracks[i].offset = parseFloat(r.value);
+      r.parentElement.querySelector(".offval").textContent = parseFloat(r.value).toFixed(1);
+      drawSpectrum();
+    });
+  });
+}
+function focusTrack(i){
+  // 高亮对应线条 + 圆点加白圈
+  state.tracks.forEach((tr, idx) => tr.highlight = (idx === i));
+  comparePanel.querySelectorAll(".cmpDot").forEach((d, idx) => d.classList.toggle("active", idx === i));
+  drawSpectrum();
+  setTimeout(() => {
+    state.tracks.forEach(tr => tr.highlight = false);
+    comparePanel.querySelectorAll(".cmpDot").forEach(d => d.classList.remove("active"));
+    drawSpectrum();
+  }, 2500);
+}
+function vibrate(){ if (navigator.vibrate) navigator.vibrate(40); }
+
+/* ====================== WAV 编码 ====================== */
+function audioBufferToWav(buffer){
+  const numCh = buffer.numberOfChannels, sr = buffer.sampleRate, frames = buffer.length;
+  const bytesPer = 2, blockAlign = numCh * bytesPer, dataSize = frames * blockAlign;
+  const ab = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(ab);
+  let off = 0;
+  const ws = s => { for (let i=0;i<s.length;i++) view.setUint8(off++, s.charCodeAt(i)); };
+  const w32 = v => { view.setUint32(off, v, true); off += 4; };
+  const w16 = v => { view.setUint16(off, v, true); off += 2; };
+  ws("RIFF"); w32(36 + dataSize); ws("WAVE");
+  ws("fmt "); w32(16); w16(1); w16(numCh); w32(sr); w32(sr * blockAlign); w16(blockAlign); w16(16);
+  ws("data"); w32(dataSize);
+  const chans = []; for (let c=0;c<numCh;c++) chans.push(buffer.getChannelData(c));
+  for (let i=0;i<frames;i++){
+    for (let c=0;c<numCh;c++){
+      let s = Math.max(-1, Math.min(1, chans[c][i]));
+      view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true); off += 2;
+    }
+  }
+  return new Blob([ab], { type: "audio/wav" });
+}
+
+/* ====================== 保存 / 导出 ====================== */
+function saveSessionToStorage(){
+  const sessions = loadSessions();
+  const tr = state.tracks[0];
+  if (!tr || !tr.points.length){ toast("还没有可保存的录音"); return null; }
+  const sess = {
+    id: "s" + Date.now(),
+    name: "录音 " + new Date().toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}),
+    createdAt: Date.now(),
+    duration: tr.duration || (tr.points.length ? tr.points[tr.points.length-1].t : 0),
+    points: tr.points,
+  };
+  sessions.push(sess);
+  localStorage.setItem("pitchSessions", JSON.stringify(sessions));
+  renderSessList();
+  return sess;
+}
+function loadSessions(){
+  try { return JSON.parse(localStorage.getItem("pitchSessions") || "[]"); } catch(e){ return []; }
+}
+
+/* ====================== 模态框 ====================== */
+function openModal(html){ $("modalBox").innerHTML = html; $("modalRoot").classList.add("show"); sfxBubble("tick"); }
+function closeModal(){ $("modalRoot").classList.remove("show"); sfxBubble("close"); }
+
+function showSaveModal(){
+  const tr = state.tracks[0];
+  if (!tr || (!tr.audioBuffer && !tr.blob)){ toast("没有可导出的音频"); return; }
+  openModal(`
+    <h3>保存录音</h3>
+    <p>当前录音将保存为音频文件。建议保存为 WAV（无损、通用）。</p>
+    <div class="row">
+      <button class="mbtn primary" id="saveWav">确认（WAV）</button>
+      <button class="mbtn" id="saveOther">保存为其他格式</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="mbtn" id="saveJson2">同时存到本地</button>
+      <button class="mbtn" id="cancelSave">取消</button>
+    </div>
+    <div id="fmtBox" class="hidden">
+      <div class="fmtSel">
+        <label><input type="radio" name="fmt" value="wav" checked> WAV（无损）</label>
+        <label><input type="radio" name="fmt" value="webm"> WebM / Opus（原始编码）</label>
+        <label><input type="radio" name="fmt" value="ogg"> OGG（若浏览器支持）</label>
+        <label style="color:var(--muted);font-size:11px;border:none;background:none">MP3 需借助外部工具转换；浏览器内仅提供上述格式。</label>
+      </div>
+      <button class="mbtn primary" id="doFmt">下载</button>
+    </div>`);
+  $("saveWav").onclick = async () => {
+    sfxBubble("send");
+    const buf = tr.audioBuffer || await (tr.blob.arrayBuffer().then(b => getCtx().decodeAudioData(b)));
+    const ok = await saveWithPicker(audioBufferToWav(buf), "pitch-" + Date.now() + ".wav");
+    if (ok) toast("已保存为 WAV"); closeModal();
+  };
+  $("saveOther").onclick = () => { sfxBubble("tick"); $("fmtBox").classList.toggle("hidden"); };
+  $("doFmt").onclick = async () => {
+    sfxBubble("send");
+    const fmt = document.querySelector('input[name="fmt"]:checked').value;
+    let blob = null;
+    if (fmt === "wav"){ blob = tr.audioBuffer ? audioBufferToWav(tr.audioBuffer) : null; }
+    else { blob = tr.blob || null; }
+    if (blob){ const ok = await saveWithPicker(blob, "pitch-" + Date.now() + "." + fmt); if (ok) toast("已保存 ." + fmt); }
+    else toast("无原始音频流");
+    closeModal();
+  };
+  $("saveJson2").onclick = () => { sfxBubble("send"); saveSessionToStorage(); toast("已存入本地"); };
+  $("cancelSave").onclick = closeModal;
+}
+
+/* ====================== 导入多文件 ====================== */
+// 支持的音频扩展名（尽量放宽，覆盖手机常见格式）
+const AUDIO_EXT_RE = /\.(wav|mp3|m4a|mp4|aac|ogg|oga|opus|webm|flac|caf|aif|aiff|amr|3gp|wma|mka|silk|slk|gsm)$/i;
+function isAudioFile(f){
+  if (!f) return false;
+  if (f.type && f.type.startsWith("audio")) return true;
+  if (f.type === "video/mp4") return true;      // 有些手机把 m4a 标成 video/mp4
+  return AUDIO_EXT_RE.test(f.name || "");
+}
+// 纯 JS 解析 WAV（不依赖 decodeAudioData，作为兜底）
+function decodeWavPureJS(arrayBuffer){
+  const dv = new DataView(arrayBuffer);
+  if (dv.getUint32(0, false) !== 0x52494646) throw new Error("非 WAV 文件"); // 'RIFF'
+  if (dv.getUint32(8, false) !== 0x57415645) throw new Error("非 WAVE 格式"); // 'WAVE'
+  let pos = 12, fmt = null, dataOffset = 0, dataLen = 0;
+  while (pos + 8 <= dv.byteLength){
+    const id = dv.getUint32(pos, false);
+    const size = dv.getUint32(pos + 4, true);
+    const body = pos + 8;
+    if (id === 0x666d7420){ // 'fmt '
+      fmt = {
+        audioFormat: dv.getUint16(body, true),
+        channels: dv.getUint16(body + 2, true),
+        sampleRate: dv.getUint32(body + 4, true),
+        bitsPerSample: dv.getUint16(body + 14, true),
+      };
+      // 兼容 WAVE_FORMAT_EXTENSIBLE
+      if (fmt.audioFormat === 0xFFFE && size >= 40) fmt.audioFormat = dv.getUint16(body + 24, true);
+    } else if (id === 0x64617461){ // 'data'
+      dataOffset = body; dataLen = size; break;
+    }
+    pos = body + size + (size % 2);
+  }
+  if (!fmt || !dataOffset) throw new Error("WAV 结构不完整");
+  const ch = fmt.channels, sr = fmt.sampleRate, bits = fmt.bitsPerSample;
+  const bytesPerSample = bits / 8;
+  const frameCount = Math.floor(dataLen / (bytesPerSample * ch));
+  const mono = new Float32Array(frameCount);
+  const isFloat = fmt.audioFormat === 3;
+  for (let i = 0; i < frameCount; i++){
+    let sum = 0;
+    for (let c = 0; c < ch; c++){
+      const off = dataOffset + (i * ch + c) * bytesPerSample;
+      let v = 0;
+      if (isFloat && bits === 32) v = dv.getFloat32(off, true);
+      else if (bits === 16) v = dv.getInt16(off, true) / 32768;
+      else if (bits === 8)  v = (dv.getUint8(off) - 128) / 128;
+      else if (bits === 24){ const b0=dv.getUint8(off),b1=dv.getUint8(off+1),b2=dv.getInt8(off+2); v = ((b2<<16)|(b1<<8)|b0) / 8388608; }
+      else if (bits === 32) v = dv.getInt32(off, true) / 2147483648;
+      sum += v;
+    }
+    mono[i] = sum / ch;
+  }
+  // 构造一个"类 AudioBuffer"对象供后续分析使用
+  return {
+    sampleRate: sr, length: frameCount, duration: frameCount / sr, numberOfChannels: 1,
+    getChannelData: () => mono,
+  };
+}
+
+async function handleImportFiles(fileList){
+  const all = Array.from(fileList || []);
+  if (!all.length){ toast("未选择文件"); return; }
+  const files = all.filter(isAudioFile);
+  const skipped = all.length - files.length;
+  if (!files.length){
+    openModal(`<h3>没有可用的音频文件</h3>
+      <p>你选择的文件里没有识别到音频。支持的格式：<br>
+      <b>WAV / MP3 / M4A / AAC / OGG / OPUS / FLAC / CAF / AMR / WebM / 3GP</b></p>
+      <p style="font-size:12px;color:var(--muted)">提示：微信语音（.silk）需先转成 MP3 或 M4A；若在手机上从「文件」App 选择，请确认文件已下载到本地（非云端占位）。</p>
+      <div class="row"><button class="mbtn primary" id="impOk">知道了</button></div>`);
+    $("impOk").onclick = closeModal;
+    return;
+  }
+  // 大文件提示
+  const tooBig = files.some(f => f.size > LARGE_FILE);
+  if (tooBig){
+    const cont = await confirmDialog("文件过大", "有文件超过 15MB，解析可能较慢，是否继续？");
+    if (!cont) return;
+  }
+  // 不清空旧轨道，改为"追加"；首次导入时才切换到对比模式
+  if (!state.compareMode){
+    state.compareMode = true;
+    state.tracks = state.tracks.filter(t => t.points && t.points.length);
+  }
+  resizeCanvases();
+  buildComparePanel();
+
+  const ctx = getCtx();
+  const failed = [];
+  for (const f of files){
+    toast("解析中：" + f.name);
+    let handled = false, errMsg = "";
+    try {
+      const ab = await f.arrayBuffer();
+      let buf = null;
+      // ① 优先用浏览器原生解码
+      try {
+        buf = await ctx.decodeAudioData(ab.slice(0));
+      } catch(e1){
+        // ② 是 WAV 就用纯 JS 兜底解析
+        const isWav = /\.wav$/i.test(f.name) || (f.type === "audio/wav") || (f.type === "audio/x-wav");
+        if (isWav){ buf = decodeWavPureJS(ab); }
+        else { throw new Error("浏览器不支持该格式（" + (e1.name || "解码失败") + "）"); }
+      }
+      addCompareTrackFromBuffer(f.name, buf);
+      // 等待该轨道的音高分析完成
+      const tr = state.tracks[state.tracks.length - 1];
+      await waitTrackAnalyzed(tr, 20000);
+      handled = true;
+    } catch(e){
+      errMsg = e.message || String(e);
+    }
+    if (!handled){ failed.push({ name: f.name, err: errMsg }); }
+    drawSpectrum(); buildComparePanel();
+  }
+  resizeCanvases();
+  if (failed.length){
+    const list = failed.map(x => "• <b>" + x.name + "</b><br><span style='font-size:12px;color:var(--muted)'>" + x.err + "</span>").join("<br>");
+    openModal(`<h3>部分文件解析失败（${failed.length}/${files.length}）</h3>
+      <div style="font-size:13px;line-height:1.8">${list}</div>
+      <p style="font-size:12px;color:var(--muted)">建议：把音频转成 <b>WAV</b> 或 <b>MP3</b> 后重试成功率最高。微信语音请先转发到电脑或用工具转码。</p>
+      <div class="row"><button class="mbtn primary" id="fOk">知道了</button></div>`);
+    $("fOk").onclick = closeModal;
+  } else if (files.length){
+    const skippedMsg = skipped > 0 ? ("（跳过 " + skipped + " 个非音频文件）") : "";
+    toast("已导入 " + files.length + " 个文件" + skippedMsg);
+  }
+}
+// 等待某轨道音高分析完成（points 非空或超时）
+function waitTrackAnalyzed(tr, timeoutMs){
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+      if ((tr.points && tr.points.length > 0) || Date.now() - t0 > timeoutMs){
+        clearInterval(timer); resolve();
+      }
+    }, 120);
+  });
+}
+
+/* ====================== 叠加录制 ====================== */
+function startOverlayMode(){
+  // 若已有第一段，准备录第二段
+  if (state.compareMode && state.tracks.length >= 1){
+    state.tracks.push(newTrack("第 2 段录音", 1));
+    state.activeTrackIdx = state.tracks.length - 1;
+  } else {
+    state.compareMode = true;
+    state.tracks = [ newTrack("第 1 段录音", 0) ];
+    state.activeTrackIdx = 0;
+  }
+  emptyHint.classList.add("hidden");
+  buildComparePanel();
+  resizeCanvases();
+  toast("开始录制" + (state.tracks.length===2 ? "第 2 段" : "第 1 段"));
+}
+
+/* ====================== 确认 / Toast ====================== */
+function confirmDialog(title, msg){
+  return new Promise(resolve => {
+    openModal(`<h3>${title}</h3><p>${msg}</p>
+      <div class="row"><button class="mbtn primary" id="ok">继续</button><button class="mbtn" id="no">取消</button></div>`);
+    $("ok").onclick = () => { sfxBubble("send"); closeModal(); resolve(true); };
+    $("no").onclick = () => { closeModal(); resolve(false); };
+  });
+}
+let toastT;
+function toast(msg){
+  sfxBubble("tick");
+  toastEl.textContent = msg; toastEl.classList.add("show");
+  clearTimeout(toastT); toastT = setTimeout(() => toastEl.classList.remove("show"), 2200);
+}
+
+/* ====================== 事件绑定 ====================== */
+const micBtn = $("micBtn"), playBtn = $("playBtn");
+micBtn.addEventListener("click", () => {
+  if (state.mode === "recording"){ stopRecording(); sfxBubble("stop"); }
+  else {
+    if (state.mode === "playing") stopAllPlayback();
+    sfxBubble("rec");
+    startRecording();
+  }
+});
+playBtn.addEventListener("click", () => { sfxBubble("tick"); playAll(); });
+
+$("sideToggle").addEventListener("click", () => { sfxBubble("open"); $("sidebar").classList.add("show"); $("overlay").classList.add("show"); });
+$("sideClose").addEventListener("click", closeSide);
+$("overlay").addEventListener("click", closeSide);
+function closeSide(){ sfxBubble("close"); $("sidebar").classList.remove("show"); $("overlay").classList.remove("show"); }
+
+// 侧边栏菜单
+$("miImport").addEventListener("click", () => { sfxBubble("tick"); closeSide(); $("fileInput").click(); });
+$("fileInput").addEventListener("change", e => { handleImportFiles(e.target.files); e.target.value = ""; });
+$("miOverlay").addEventListener("click", () => { sfxBubble("tick"); closeSide(); startOverlayMode(); });
+$("miSave").addEventListener("click", () => { sfxBubble("tick"); closeSide(); showSaveModal(); });
+$("miExport").addEventListener("click", async () => {
+  sfxBubble("send"); closeSide();
+  const sessions = loadSessions();
+  const data = { app: "音高检测与对比器", version: 1, exportedAt: Date.now(), sessions };
+  const ok = await saveWithPicker(new Blob([JSON.stringify(data, null, 2)], {type:"application/json"}), "pitch-backup-" + Date.now() + ".json");
+  if (ok) toast("已导出 JSON 备份");
+});
+$("miImportJson").addEventListener("click", () => { sfxBubble("tick"); closeSide(); $("jsonInput").click(); });
+$("miPerm").addEventListener("click", () => { sfxBubble("tick"); closeSide(); openPermCenter(); });
+$("miInstall").addEventListener("click", () => { sfxBubble("send"); closeSide(); doInstall(); });
+$("miSound").addEventListener("click", () => {
+  soundOn = !soundOn;
+  $("soundState").textContent = soundOn ? "开" : "关";
+  if (soundOn) sfxBubble("tick");
+  toast(soundOn ? "气泡音效：开" : "气泡音效：关");
+});
+$("jsonInput").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const obj = JSON.parse(r.result);
+      const list = obj.sessions || (Array.isArray(obj) ? obj : []);
+      const cur = loadSessions();
+      localStorage.setItem("pitchSessions", JSON.stringify(cur.concat(list)));
+      renderSessList(); toast("已导入 " + list.length + " 条录音");
+    } catch(err){ toast("JSON 解析失败"); }
+  };
+  r.readAsText(f); e.target.value = "";
+});
+$("miClear").addEventListener("click", async () => {
+  const ok = await confirmDialog("清空本地存储", "确定删除全部本地录音？此操作不可恢复。");
+  if (ok){ localStorage.removeItem("pitchSessions"); renderSessList(); toast("已清空"); }
+});
+
+/* 会话列表 */
+function renderSessList(){
+  const list = $("sessList"); list.innerHTML = "";
+  const sessions = loadSessions();
+  if (!sessions.length){ list.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:6px">暂无保存的录音</div>'; return; }
+  sessions.slice().reverse().forEach(s => {
+    const div = document.createElement("div");
+    div.className = "sessItem";
+    div.innerHTML = `<div><div class="nm">${s.name}</div><div class="meta">${s.points? s.points.length:0} 点 · ${(s.duration||0).toFixed(1)}s</div></div>
+      <div class="del" data-id="${s.id}">删除</div>`;
+    div.querySelector(".del").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const cur = loadSessions().filter(x => x.id !== s.id);
+      localStorage.setItem("pitchSessions", JSON.stringify(cur)); renderSessList();
+    });
+    div.addEventListener("click", () => loadSessionToView(s));
+    list.appendChild(div);
+  });
+}
+function loadSessionToView(s){
+  stopAllPlayback();
+  state.compareMode = false;
+  state.tracks = [ newTrack(s.name, 0) ];
+  state.tracks[0].points = s.points || [];
+  state.tracks[0].duration = s.duration || (s.points && s.points.length ? s.points[s.points.length-1].t : 0);
+  state.activeTrackIdx = 0;
+  emptyHint.classList.add("hidden");
+  comparePanel.classList.remove("show");
+  closeSide();
+  resizeCanvases();
+  if (state.tracks[0].points.length) playBtn.disabled = false;
+  toast("已载入：" + s.name);
+}
+
+/* ====================== 初始化 ====================== */
+let deferredInstallPrompt = null;
+function registerServiceWorker(){
+  // 注册 Service Worker：离线可用 + 可「添加到主屏幕」当安装包使用
+  if ("serviceWorker" in navigator && isSecure() && location.protocol !== "file:"){
+    navigator.serviceWorker.register("./sw.js").then((reg) => {
+      // 有新版本时自动更新，并在下次打开生效
+      reg.addEventListener("updatefound", () => {
+        const nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener("statechange", () => {
+          if (nw.state === "installed" && navigator.serviceWorker.controller){
+            toast("已更新到最新版，下次打开即生效");
+          }
+        });
+      });
+    }).catch(() => {});
+  }
+  // 捕获安装提示，供「安装到桌面」按钮使用
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    const btn = $("miInstall");
+    if (btn) btn.style.display = "flex";
+  });
+  // 已安装为 App 时隐藏安装按钮
+  window.addEventListener("appinstalled", () => {
+    deferredInstallPrompt = null;
+    const btn = $("miInstall");
+    if (btn) btn.style.display = "none";
+  });
+}
+async function doInstall(){
+  if (deferredInstallPrompt){
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    $("miInstall").style.display = "none";
+    toast("已发起安装，请在系统提示中确认");
+  } else {
+    // iOS / 已安装 / 不支持自动安装时的指引
+    openModal(`<h3>安装到手机桌面</h3>
+      <p><b>Android / Chrome：</b>点击右上角菜单 →「安装应用 / 添加到主屏幕」。<br><br>
+      <b>iPhone / Safari：</b>点击底部「分享」按钮 →「添加到主屏幕」。<br><br>
+      安装后从桌面图标启动，即为独立 App 形态，可正常使用麦克风。</p>
+      <div class="row"><button class="mbtn primary" id="instOk">我知道了</button></div>`);
+    $("instOk").onclick = closeModal;
+  }
+}
+function firstLaunchCard(){
+  if (localStorage.getItem("permOnboarded")) return;
+  const secure = isSecure();
+  const app = inAppBrowser();
+  // 非阻塞式底部提示条：绝不覆盖频谱区，用户可随时上下滑动
+  const bar = document.createElement("div");
+  bar.id = "onboardBar";
+  const warn = (!secure || app);
+  bar.innerHTML = `
+    <div class="obText">
+      🎤 需要麦克风权限才能检测音高
+      ${!secure ? '<br><b style="color:var(--red)">⚠ 当前非安全环境（非 https / localhost），麦克风将不可用</b>' : ""}
+      ${app ? '<br><b style="color:var(--red)">⚠ 正在 ' + app + ' 中打开，请点右上角「⋯」→ 在浏览器打开</b>' : ""}
+    </div>
+    <div class="obBtns">
+      <button class="obBtn primary" id="obGrant">授权</button>
+      <button class="obBtn" id="obCenter">权限中心</button>
+      <button class="obBtn" id="obLater">✕</button>
+    </div>`;
+  document.getElementById("app").appendChild(bar);
+  const dismiss = () => { localStorage.setItem("permOnboarded","1"); bar.remove(); };
+  $("obGrant").onclick = async () => {
+    try {
+      const s = await requestMic(); s.getTracks().forEach(t => t.stop());
+      sfxBubble("send"); toast("麦克风已授权"); dismiss();
+    } catch(e){ if (e && e.code){ showPermGuide(e.code, e.msg); } else { toast("授权失败"); } }
+  };
+  $("obCenter").onclick = () => { openPermCenter(); };
+  $("obLater").onclick = dismiss;
+}
+function init(){
+  resizeCanvases();
+  renderSessList();
+  registerServiceWorker();
+  if (!initStorage()) toast("本地存储不可用，录音将无法保存（可能为隐私模式）");
+  // 音名纵轴随频谱纵向滚动同步；用户手动横向滚动时暂停自动跟随
+  scrollArea.addEventListener("scroll", () => {
+    noteAxis.scrollTop = scrollArea.scrollTop;
+    if (state.userScrolling) state.followRec = false;
+  }, { passive: true });
+  // 触摸/滚轮操作视为用户主动滚动
+  scrollArea.addEventListener("touchstart", () => { state.userScrolling = true; }, { passive: true });
+  scrollArea.addEventListener("touchend", () => { setTimeout(() => state.userScrolling = false, 300); }, { passive: true });
+  scrollArea.addEventListener("wheel", () => { state.followRec = false; }, { passive: true });
+  // 初始单轨道
+  state.tracks = [ newTrack("第 1 段录音", 0) ];
+  firstLaunchCard();
+}
+window.addEventListener("resize", () => { resizeCanvases(); });
+window.addEventListener("orientationchange", () => setTimeout(resizeCanvases, 300));
+init();
+// 尽早注册 SW 以建立离线缓存（不等首屏渲染完成）
+try { registerServiceWorker(); } catch(e) {}
+
+// 在线 / 离线状态提示（离线时页面仍可完整使用）
+function updateNetBadge(){
+  let b = document.getElementById("netBadge");
+  if (!b){
+    b = document.createElement("div");
+    b.id = "netBadge";
+    document.getElementById("app").appendChild(b);
+  }
+  const off = !navigator.onLine;
+  b.textContent = off ? "离线模式（功能正常）" : "";
+  b.className = off ? "show" : "";
+}
+window.addEventListener("online", updateNetBadge);
+window.addEventListener("offline", updateNetBadge);
+setTimeout(updateNetBadge, 500);
+</script>
+</body>
+</html>
