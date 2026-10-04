@@ -2115,11 +2115,11 @@ async function handleImportFiles(fileList){
   const skipped = 0;
   if (!files.length){
     openModal(`<h3>没有可用的音频文件</h3>
-      <p>你选择的文件里没有识别到音频。支持的格式：<br>
-      <b>WAV / MP3 / M4A / AAC / OGG / OPUS / FLAC / CAF / AMR / WebM<br>
+      <p>你选择的文件里没有识别到音频。可直接导入的格式：<br>
+      <b>WAV / MP3 / M4A / AAC / OGG / OPUS / FLAC / CAF / WebM<br>
       MP4 / MOV / MKV / AVI / TS / 3GP（视频会自动抽取音轨）<br>
-      WMA / MKA / AU / VOC / AC3 / MIDI 等</b></p>
-      <p style="font-size:12px;color:var(--muted)">提示：微信语音（.silk）需先转成 MP3 或 M4A；若在手机上从「文件」App 选择，请确认文件已下载到本地（非云端占位）。</p>
+      以及绝大多数其它容器（选择即尝试解码）</b></p>
+      <p style="font-size:12px;color:var(--muted)">提示：WMA / AC-3 / DTS / AMR / SILK 等少数编解码浏览器内核不支持，需先转一次成 MP3 或 M4A；若在手机上从「文件」App 选择，请确认文件已下载到本地（非云端占位）。</p>
       <div class="row"><button class="mbtn primary" id="impOk">知道了</button></div>`);
     $("impOk").onclick = closeModal;
     return;
@@ -2173,9 +2173,20 @@ async function handleImportFiles(fileList){
           try { buf = await decodeViaElement(f); } catch(e3){}
         }
         if (!buf){
-          const hint = isVideoContainer(f)
-            ? "浏览器无法从该视频容器抽取音轨，建议先用工具转成 MP3/M4A"
-            : "浏览器不支持该格式（" + (e1.name || "解码失败") + "）";
+          // 明确区分"浏览器不支持该编解码"与"视频抽轨失败"，给出更具体的建议
+          const nm = (f.name || "").toLowerCase();
+          const codecHint = /\.(wma|asf|wmv)$/.test(nm) ? "WMA（Windows Media 音频）"
+            : /\.(ac3|eac3|dts|dtshd)$/.test(nm) ? "AC-3 / DTS（影院音轨）"
+            : /\.(amr|awb|3ga|silk|slk)$/.test(nm) ? "AMR / SILK（微信语音/录音笔）"
+            : /\.(ape|mac|wv|tta|tak|shn)$/.test(nm) ? "APE / Monkey's Audio 等无损格式"
+            : /\.(mid|midi|kar|rmi)$/.test(nm) ? "MIDI（并非波形音频）"
+            : null;
+          const hint = codecHint
+            ? ("浏览器内核不支持 " + codecHint + " 的解码。这是平台限制（几乎所有纯网页应用都一样），"
+               + "请用任意转码工具或手机的『导出为 MP3/M4A』转一次即可，其余格式都可直接导入。")
+            : isVideoContainer(f)
+              ? "浏览器无法从该视频容器抽取音轨，建议先用工具转成 MP3/M4A"
+              : "浏览器不支持该格式（" + (e1.name || "解码失败") + "）";
           throw new Error(hint);
         }
       }
