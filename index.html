@@ -1061,61 +1061,73 @@ function drawSpectrum(){
   const cullPad = 60;   // 可视区外额外保留的像素（避免边缘突现）
 
   for (const tr of visibleTracks){
-    // ---- Path2D 缓存：键值含 px/offset/padL/点数 ----
-    const key = px.toFixed(2) + "|" + (tr.offset||0) + "|" + padL + "|" + tr.points.length + "|" + w;
-    let cached = tr._path;
-    if (!cached || cached.key !== key){
+    // ---- Path2D 增量缓存（关键性能优化）----
+    // 录制时 points 只增不改，若每帧整条重建，长录音会 O(n) 拖垮帧率。
+    // 这里只把"新增的点"追加到一条尾部 path 上，主 path 保持不动：
+    //   mainPath  = 已冻结的历史段（点数 = tr._pathN）
+    //   tailPath  = 自 _pathN 之后追加的新点（随录制增长，通常很短）
+    // 只有 px / offset / padL / 纵向半音像素 变化时才需要整条重建（画布宽度变化不影响路径几何）。
+    const key = px.toFixed(2) + "|" + (tr.offset||0) + "|" + padL + "|" + SEMI_PX.toFixed(3);
+    let cache = tr._pathCache;
+    if (!cache || cache.key !== key || tr._pathN > tr.points.length){
+      // 整条重建
       const path = new Path2D();
-      let started = false;
-      for (const p of tr.points){
-        const x = padL + (p.t + (tr.offset||0)) * px;
-        const y = midiToY(p.midi);
-        if (!started){ path.moveTo(x, y); started = true; } else path.lineTo(x, y);
+      const pts = tr.points;
+      for (let i = 0; i < pts.length; i++){
+        const x = padL + (pts[i].t + (tr.offset||0)) * px;
+        const y = midiToY(pts[i].midi);
+        if (i === 0) path.moveTo(x, y); else path.lineTo(x, y);
       }
-      cached = tr._path = { key, path };
+      cache = tr._pathCache = { key, path, tail: null, from: pts.length };
+      tr._pathN = pts.length;
+    } else if (tr.points.length > cache.from){
+      // 仅追加新点：从 from-1 起画到末尾，接到冻结主 path 之后
+      const pts = tr.points;
+      const tail = new Path2D();
+      const startI = Math.max(0, cache.from - 1);          // 与前一点相连，避免断线
+      for (let i = startI; i < pts.length; i++){
+        const x = padL + (pts[i].t + (tr.offset||0)) * px;
+        const y = midiToY(pts[i].midi);
+        if (i === startI) tail.moveTo(x, y); else tail.lineTo(x, y);
+      }
+      cache.tail = tail;
+      cache.from = pts.length;
+      tr._pathN = pts.length;
     }
-    const path = cached.path;
+    const mainPath = cache.path;
+    const tailPath = cache.tail;
+    const strokeAll = (style, lw, shadow, blur) => {
+      if (shadow){ specCtx.shadowColor = shadow; specCtx.shadowBlur = blur; }
+      else { specCtx.shadowBlur = 0; }
+      specCtx.strokeStyle = style; specCtx.lineWidth = lw;
+      specCtx.stroke(mainPath);
+      if (tailPath) specCtx.stroke(tailPath);
+    };
     // ---- 可视裁剪：只绘制落在可视区内的部分 ----
     const xL = scrollArea.scrollLeft - cullPad, xR = scrollArea.scrollLeft + scrollArea.clientWidth + cullPad;
     specCtx.save();
     specCtx.beginPath(); specCtx.rect(xL, 0, xR - xL, h); specCtx.clip();
     specCtx.lineJoin = "round"; specCtx.lineCap = "round";
     if (useGlow){
-      // ① 外层彩色光晕（最醒目）
-      specCtx.shadowColor = tr.color; specCtx.shadowBlur = 14;
-      specCtx.strokeStyle = tr.color; specCtx.lineWidth = 3.6;
-      specCtx.stroke(path);
-      // ② 中层亮色实线（提高饱和度与亮度）
-      specCtx.shadowBlur = 6;
-      specCtx.strokeStyle = lighten(tr.color, 0.35); specCtx.lineWidth = 2.2;
-      specCtx.stroke(path);
+      strokeAll(tr.color, 3.6, tr.color, 14);                    // ① 外层彩色光晕
+      strokeAll(lighten(tr.color, 0.35), 2.2, tr.color, 6);      // ② 中层亮色实线
     } else {
-      // 多轨：单层描边（无光晕）——大幅降低 GPU/CPU 开销
-      specCtx.strokeStyle = lighten(tr.color, 0.2); specCtx.lineWidth = 2.4;
-      specCtx.stroke(path);
+      strokeAll(lighten(tr.color, 0.2), 2.4, null, 0);           // 多轨：单层描边（无光晕）
     }
-    // ③ 内层白色高光芯线（让线条"发光"）
-    specCtx.shadowBlur = 0;
-    specCtx.strokeStyle = "rgba(255,255,255,.85)"; specCtx.lineWidth = 0.9;
-    specCtx.stroke(path);
+    // ③ 内层白色高光芯线
+    strokeAll("rgba(255,255,255,.85)", 0.9, null, 0);
     // 高亮描边（点击列表时）
     if (tr.highlight){
-      specCtx.shadowColor = "rgba(255,224,0,.95)"; specCtx.shadowBlur = 16;
-      specCtx.strokeStyle = "rgba(255,224,0,.95)"; specCtx.lineWidth = 5.5;
-      specCtx.stroke(path);
+      strokeAll("rgba(255,224,0,.95)", 5.5, "rgba(255,224,0,.95)", 16);
     }
     // 同色柔光闪烁（圆按钮切换显隐时触发，约 640ms 一个明暗周期）
     if (tr.glowUntil && performance.now() < tr.glowUntil){
       const phase = (performance.now() % 640) / 640;
       const a = 0.25 + 0.75 * (0.5 - 0.5 * Math.cos(phase * Math.PI * 2));
-      specCtx.shadowColor = tr.color; specCtx.shadowBlur = 26;
-      specCtx.strokeStyle = tr.color; specCtx.globalAlpha = a;
-      specCtx.lineWidth = 8.5;
-      specCtx.stroke(path);
-      specCtx.strokeStyle = lighten(tr.color, 0.55);
-      specCtx.shadowBlur = 34; specCtx.lineWidth = 4;
-      specCtx.stroke(path);
+      specCtx.globalAlpha = a;
+      strokeAll(tr.color, 8.5, tr.color, 26);
       specCtx.globalAlpha = 1;
+      strokeAll(lighten(tr.color, 0.55), 4, tr.color, 34);
     }
     specCtx.restore();
   }
@@ -2094,8 +2106,13 @@ function decodeWavPureJS(arrayBuffer){
 async function handleImportFiles(fileList){
   const all = Array.from(fileList || []);
   if (!all.length){ toast("未选择文件"); return; }
-  const files = all.filter(isAudioFile);
-  const skipped = all.length - files.length;
+  // 不再按扩展名硬性过滤：只要用户选了就一律尝试解码。
+  // 浏览器原生 decodeAudioData 支持的容器远多于白名单，白名单只用于"优先排序/提示"，
+  // 真正的判定交给解码器本身（解不开才会在结果里报错）。这样用户可直接导入绝大多数格式，
+  // 无需任何二次转换。
+  const unknown = all.filter(f => !isAudioFile(f)).length;   // 仅用于提示
+  const files = all;
+  const skipped = 0;
   if (!files.length){
     openModal(`<h3>没有可用的音频文件</h3>
       <p>你选择的文件里没有识别到音频。支持的格式：<br>
@@ -2182,8 +2199,7 @@ async function handleImportFiles(fileList){
       <div class="row"><button class="mbtn primary" id="fOk">知道了</button></div>`);
     $("fOk").onclick = closeModal;
   } else if (files.length){
-    const skippedMsg = skipped > 0 ? ("（跳过 " + skipped + " 个非音频文件）") : "";
-    toast("已导入 " + files.length + " 个文件" + skippedMsg);
+    toast("已导入 " + files.length + " 个文件" + (unknown > 0 ? "（含 " + unknown + " 个未知类型，已尝试解码）" : ""));
   }
 }
 // 等待某轨道音高分析完成（points 非空或超时）
@@ -2327,7 +2343,7 @@ function resetToInitial(){
   comparePanel.classList.remove("show"); comparePanel.innerHTML = "";
   emptyHint.classList.remove("hidden");
   // 清空本地对比/会话暂存（保留已保存录音列表，用户可在侧栏自行删除）
-  try { state.tracks.forEach(t => { t.points = []; }); } catch(e) {}
+  try { state.tracks.forEach(t => { t.points = []; t._pathCache = null; t._pathN = 0; }); } catch(e) {}
   // 视角与画布复位
   scrollArea.scrollLeft = 0;
   state.scrolledInit = false;
@@ -2544,7 +2560,7 @@ function init(){
     const rect = scrollArea.getBoundingClientRect();
     const cx = e.clientX - rect.left + scrollArea.scrollLeft;
     const cy = e.clientY - rect.top + scrollArea.scrollTop;
-    const tPos = cx / state.px;                 // 点击处对应的时间
+    const tPos = Math.max(0, (cx - (state.padL || 0)) / state.px);  // 减去左内边距，保证与谱线对齐
     const midiClick = yToMidi(cy);              // 点击处对应的音高
     // 在所有可见轨道的音高点中，找离点击位置（时间+音高）最近的
     let best = null, bestD = Infinity;
