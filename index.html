@@ -86,6 +86,20 @@
     box-shadow: 0 0 8px rgba(255,23,68,1);
     display: none;
   }
+  /* 十字准星旁的音高标签（圆滑小矩形） */
+  #crosshairTag {
+    position: absolute; z-index: 11; pointer-events: none;
+    padding: 3px 9px; border-radius: 9px;
+    background: rgba(0,0,0,.9); font-size: 13px; font-weight: 800;
+    border: 1.5px solid #fff; white-space: nowrap;
+    transform: translate(12px, -50%);
+    box-shadow: 0 2px 10px rgba(0,0,0,.65);
+    display: none;
+  }
+  #crosshairTag.high { color: #ffe000; border-color: #ffe000; box-shadow: 0 0 14px rgba(255,224,0,.55), 0 2px 10px rgba(0,0,0,.65); }
+  #crosshairTag.mid { color: #ffffff; border-color: #ffffff; }
+  #crosshairTag.low { color: #ff3b30; border-color: #ff3b30; box-shadow: 0 0 14px rgba(255,59,48,.5), 0 2px 10px rgba(0,0,0,.65); }
+  #crosshairTag small { font-size: 10px; font-weight: 600; opacity: .8; margin-left: 3px; }
 
   /* 点击频谱线的绿色音高标记 */
   #clickMarkerDot {
@@ -367,6 +381,8 @@
     <div id="crosshairV"></div>
     <div id="crosshairH"></div>
     <div id="crosshairDot"></div>
+    <!-- 十字准星旁的音高标签框 -->
+    <div id="crosshairTag"></div>
     <!-- 点击频谱线的绿色音高标记 -->
     <div id="clickMarkerDot"></div>
     <div id="clickMarkerBox"></div>
@@ -514,7 +530,7 @@ const rulerCanvas = $("rulerCanvas"), rulerCtx = rulerCanvas.getContext("2d");
 const noteAxis = $("noteAxis"), noteAxisInner = $("noteAxisInner"), scrollArea = $("scrollArea"), specContent = $("specContent");
 const emptyHint = $("emptyHint"), comparePanel = $("comparePanel");
 const notePopup = $("notePopup"), toastEl = $("toast");
-const crosshairV = $("crosshairV"), crosshairH = $("crosshairH"), crosshairDot = $("crosshairDot");
+const crosshairV = $("crosshairV"), crosshairH = $("crosshairH"), crosshairDot = $("crosshairDot"), crosshairTag = $("crosshairTag");
 const clickMarkerDot = $("clickMarkerDot"), clickMarkerBox = $("clickMarkerBox");
 let SEMI_PX = 28; // 每个半音在频谱纵向的像素（自适应）
 
@@ -885,6 +901,18 @@ function renderCrosshair(){
   crosshairDot.style.top = y + "px";
   crosshairDot.style.background = (midi > PITCH_HI) ? COLOR_HI
     : (midi < PITCH_LO) ? COLOR_LOW : "#ff1744";
+  // 音高标签框（圆滑小矩形）：显示在红点右侧，颜色随音高分级
+  crosshairTag.className = pitchClass(midi == null ? 60 : midi);
+  if (havePitch && inViewY && (fixed || inViewX)){
+    crosshairTag.style.display = "block";
+    crosshairTag.style.left = x + "px";
+    crosshairTag.style.top = y + "px";
+    const note = midiToNote(Math.round(midi));
+    const hz = midiToFreq(Math.round(midi)).toFixed(1);
+    crosshairTag.innerHTML = note + "<small>" + hz + "Hz</small>";
+  } else {
+    crosshairTag.style.display = "none";
+  }
 }
 function hideCrosshair(){
   state.crosshair.tPos = null;
@@ -892,6 +920,7 @@ function hideCrosshair(){
   crosshairV.style.display = "none";
   crosshairH.style.display = "none";
   crosshairDot.style.display = "none";
+  crosshairTag.style.display = "none";
 }
 // 录音中/回放中：竖线锁在屏幕中央，横线落在"频谱线最前端"音高上
 let _chFadeTimer = null;
@@ -1471,47 +1500,76 @@ function stopRecording(){
 
 /* ====================== 播放 ====================== */
 let playHandles = [];
+// 当前竖线（屏幕中央）所截到的时间轴时刻 —— 播放起点
+function centerTime(){
+  return Math.max(0, scrollArea.scrollLeft / state.px);
+}
+// 找到该时刻附近最近的音高（用于播放起点提示）
+function nearestPitchAt(t){
+  let best = null, bestD = Infinity;
+  for (const tr of state.tracks){
+    if (tr.hidden || !tr.points || !tr.points.length) continue;
+    for (let i = tr.points.length - 1; i >= 0; i--){
+      const tt = tr.points[i].t + (tr.offset || 0);
+      const d = Math.abs(tt - t);
+      if (d < bestD){ bestD = d; best = { tr, pt: tr.points[i], tt }; }
+      if (tt < t - 2) break;
+    }
+  }
+  return (best && bestD <= 2) ? best : null;
+}
 function stopAllPlayback(){
   try { playHandles.forEach(h => { try{ h.source.stop(); }catch(e){} try{ h.gain.disconnect(); }catch(e){} }); } catch(e){}
   playHandles = [];
   if (typeof _scanTimer !== "undefined" && _scanTimer){ clearTimeout(_scanTimer); _scanTimer = null; }
+  if (typeof _playFollowRAF !== "undefined" && _playFollowRAF){ cancelAnimationFrame(_playFollowRAF); _playFollowRAF = null; }
   document.querySelectorAll(".pitchLabel").forEach(el => el.remove());
+  state.tracks.forEach(t => { if (t._label){ try{ t._label.remove(); }catch(e){} t._label = null; } });
   state.mode = "idle";
   playBtn.textContent = "▶ 播放"; playBtn.disabled = !state.tracks.some(t=>t.points.length);
   cancelAnimationFrame(stopAllPlayback._raf);
 }
 async function playAll(){
   if (state.mode === "playing"){ stopAllPlayback(); return; }
+  // 播放起点 = 竖线（屏幕中央）截到的频谱线时刻，而非每次从头
+  const startT = centerTime();
+  const near = nearestPitchAt(startT);
   // 严格按时间轴扫描发声：多轨对比 / 多个音频轨时，只有播放头扫过谱线才发声
   const audioTracks = state.tracks.filter(t => !t.hidden && t.audioBuffer && t.points.length);
-  if (state.compareMode || audioTracks.length > 1){ rebuildTimelineScan(); return; }
+  if (state.compareMode || audioTracks.length > 1){ rebuildTimelineScan(startT); return; }
   const ctx = getCtx();
   const hasAudio = state.tracks.some(t => t.audioBuffer && !t.hidden);
   if (!hasAudio) toast("无音频数据，按时间轴演示音高（无声）");
+  else if (near) toast("从 " + startT.toFixed(1) + "s 处（" + near.pt.note + "）开始播放");
   state.mode = "playing";
   playBtn.textContent = "■ 停止";
   document.querySelectorAll(".pitchLabel").forEach(el => el.remove());
+  state.tracks.forEach(t => { if (t._label){ try{ t._label.remove(); }catch(e){} t._label = null; } });
+  state.followRec = true;              // 播放时开启视角跟随
+  state.userScrolling = false;
+  state.autofollowPausedUntil = 0;
 
   const startCtx = ctx.currentTime;
   for (const tr of state.tracks){
     if (tr.hidden) continue;
     if (!tr.points.length) continue;
+    const off = tr.offset || 0;
     if (tr.audioBuffer){
       const src = ctx.createBufferSource();
       src.buffer = tr.audioBuffer;
       const gain = ctx.createGain();
       gain.gain.value = tr.bgm ? 0.5 : 1.0;
       src.connect(gain).connect(ctx.destination);
-      const off = tr.offset || 0;
-      src.start(0, Math.max(0, off));
-      const h = { source: src, gain, track: tr, startCtx, offset: off, ended: false, virtual: false };
+      // 从竖线处起播：音频内部偏移 = 播放头时刻（相对该轨）
+      const aStart = Math.max(0, Math.min(tr.audioBuffer.duration, startT - off));
+      try { src.start(0, aStart); } catch(e){ continue; }
+      const h = { source: src, gain, track: tr, startCtx, offset: off, aStart, ended: false, virtual: false };
       src.onended = () => { h.ended = true; };
       playHandles.push(h);
     } else {
       // 无音频：虚拟播放（按真实时间推进音高标签）
-      const off = tr.offset || 0;
       const dur = tr.points[tr.points.length-1].t;
-      const h = { source: null, gain: null, track: tr, startCtx, offset: off, ended: false, virtual: true, duration: dur };
+      const h = { source: null, gain: null, track: tr, startCtx, offset: off, aStart: Math.max(0, startT - off), ended: false, virtual: true, duration: dur };
       playHandles.push(h);
     }
   }
@@ -1519,18 +1577,44 @@ async function playAll(){
 
   function tick(){
     let anyAlive = false;
+    let playT = null;
     for (const h of playHandles){
       if (h.ended) continue;
-      const elapsed = ctx.currentTime - h.startCtx; // 从 0 开始的真实时间
-      const tPos = elapsed + h.offset;              // 频谱时间轴位置
+      const elapsed = ctx.currentTime - h.startCtx; // 从起播点开始的真实时间
+      const tPos = h.aStart + elapsed + h.offset;   // 频谱时间轴位置
       updatePitchLabel(h.track, tPos, elapsed);
-      const dur = h.virtual ? (h.duration - h.offset) : (h.track.audioBuffer.duration - h.offset);
+      if (playT == null || tPos < playT) playT = tPos;
+      const dur = h.virtual ? (h.duration - h.aStart) : (h.track.audioBuffer.duration - h.aStart);
       if (elapsed < dur + 0.05) anyAlive = true;
     }
+    // 播放时视角跟随：让播放点保持在屏幕正中央
+    followPlayback(playT);
     if (anyAlive && state.mode === "playing"){ stopAllPlayback._raf = requestAnimationFrame(tick); }
     else { stopAllPlayback(); }
   }
   tick();
+}
+// 播放时视角跟随（内容坐标 t → 让 t 落在屏幕中线；用户在滑动则暂停）
+let _playFollowRAF = null;
+function followPlayback(t){
+  if (t == null) return;
+  if (!state.followRec || state.userScrolling || Date.now() < (state.autofollowPausedUntil || 0)) return;
+  state.followTargetX = Math.max(0, t * state.px);
+  if (_playFollowRAF) return;
+  const step = () => {
+    _playFollowRAF = null;
+    if (state.mode !== "playing") return;
+    if (!state.followRec || state.userScrolling || Date.now() < (state.autofollowPausedUntil || 0)) return;
+    if (typeof state.followTargetX === "number"){
+      const dx = state.followTargetX - scrollArea.scrollLeft;
+      if (Math.abs(dx) > 0.5){
+        scrollArea.scrollLeft += dx * 0.18;
+        syncRulerScroll?.(); resyncOverlays?.(); drawSpectrum();
+        _playFollowRAF = requestAnimationFrame(step);
+      }
+    }
+  };
+  _playFollowRAF = requestAnimationFrame(step);
 }
 function updatePitchLabel(tr, tPos, elapsed){
   // 找到该时间点最近的音高点
@@ -1556,31 +1640,37 @@ function updatePitchLabel(tr, tPos, elapsed){
     tr._label = label;
   }
   label.style.display = "block";
-  const x = (pt.t + (tr.offset||0)) * state.px;
+  const x = state.padL + (pt.t + (tr.offset||0)) * state.px;   // 含左内边距，保证与谱线对齐
   const y = midiToY(pt.midi);
   label.style.left = x + "px";
   label.style.top = y + "px";
   label.textContent = pt.note;
   label.classList.toggle("high", pt.midi > PITCH_HI);
   label.classList.toggle("low", pt.midi < PITCH_LO);
-  label.style.borderColor = label.style.color = "";
   label.style.color = pitchColor(pt.midi);
-  // 保证标签在可视范围时滚动跟随
-  const saRect = scrollArea.getBoundingClientRect();
-  if (x > scrollArea.scrollLeft + saRect.width - 40) scrollArea.scrollLeft = x - saRect.width + 60;
+  label.style.borderColor = pitchColor(pt.midi);
+  // 视角跟随由 followPlayback 统一负责，这里不再强制滚动，避免与跟随打架
 }
 /* 重播：严格按时间轴，播放头扫过谱线时才发声。
    以播放头（视口中心）所在时刻为基准，切出一个很短的扫描窗口 [sweepT, sweepT+STEP)，
    只有该窗口内存在谱线的轨道才播放其对应片段；片段播完后播放头自动前进，
    继续扫描下一段谱线，从而实现"时间轴扫过哪里就响哪里"。 */
-let _scanTimer = null;
-function rebuildTimelineScan(){
-  stopAllPlayback();
+function rebuildTimelineScan(startT){
+  const wasPlaying = state.mode === "playing";         // 递归推进时已处于播放态
+  stopAllPlayback();                                   // 停掉上一窗口的发声句柄（会置 idle）
+  state.mode = wasPlaying ? "playing" : "idle";        // 递归推进时保持播放态，避免推进逻辑被打断
   if (_scanTimer){ clearTimeout(_scanTimer); _scanTimer = null; }
   const ctx = getCtx();
   const STEP = 0.35;                                   // 每次扫描推进的时窗（秒）
-  const centerX = scrollArea.scrollLeft + scrollArea.clientWidth * 0.5;
-  const sweepT = centerX / state.px;                   // 播放头当前时刻
+  // 起点：由外部传入（竖线截取处），否则用屏幕中央
+  const baseT = (typeof startT === "number" && isFinite(startT)) ? startT : centerTime();
+  // 首次进入（非递归）：把视角对齐到起点，使播放头恰好位于中线
+  if (!wasPlaying){
+    state.followRec = true; state.userScrolling = false; state.autofollowPausedUntil = 0;
+    scrollArea.scrollLeft = Math.max(0, baseT * state.px);
+    syncRulerScroll?.(); resyncOverlays?.();
+  }
+  const sweepT = baseT;                                // 播放头当前时刻
   const started = [];
   for (let i = 0; i < state.tracks.length; i++){
     const tr = state.tracks[i];
