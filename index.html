@@ -416,7 +416,7 @@
 <!-- Toast -->
 <div id="toast"></div>
 
-<input type="file" id="fileInput" accept="audio/*,video/*,.wav,.mp3,.m4a,.m4b,.aac,.ogg,.opus,.flac,.caf,.aiff,.amr,.wma,.mka,.au,.voc,.ac3,.mid,.midi,.mp4,.mov,.mkv,.webm,.3gp" multiple>
+<input type="file" id="fileInput" accept="*/*" multiple>
 <input type="file" id="jsonInput" accept="application/json,.json">
 
 <script>
@@ -503,6 +503,7 @@ const state = {
   autofollowPausedUntil: 0,// 用户手动操作后暂停跟随的截止时间戳
   followTargetX: null,     // 自动跟随的横向目标
   followTargetY: null,     // 自动跟随的纵向目标
+  padL: 0,                 // 内容左内边距：t=0 对应的像素位置（= 屏幕中线）
 };
 
 /* ====================== DOM ====================== */
@@ -528,12 +529,13 @@ function resizeCanvases(){
   // 纵向：内容高度 = 可视高度 × 3（约 1/3 可见），用户可上下滑动看全音域 C1–C8
   const contentH = Math.max(sh * 3, SEMI_COUNT * 12);
   SEMI_PX = contentH / SEMI_COUNT;
-  // 横向：固定像素/秒（不再随长度收缩），录音多长、时间轴就能滑多远
+  // 横向：t=0 从屏幕中线开始（padL）。这样录音最前端天生压在中央竖线上。
+  state.padL = Math.round(scrollArea.clientWidth / 2);
   const maxT = currentMaxTime();
   let px = Math.max(PX_PER_SEC, 6);
-  if (maxT * px + 60 > 32000) px = Math.max(6, (32000 - 60) / maxT);
+  if ((maxT + 2) * px + state.padL > 32000) px = Math.max(6, (32000 - state.padL) / (maxT + 2));
   state.px = px;
-  const contentW = Math.max(scrollArea.clientWidth, Math.round(maxT * state.px + 60));
+  const contentW = Math.max(scrollArea.clientWidth, Math.round(state.padL + (maxT + 2) * state.px));
 
   specContent.style.width = contentW + "px";
   specContent.style.height = contentH + "px";
@@ -584,9 +586,10 @@ function drawRuler(){
   const w = rulerCanvas.width, h = rulerCanvas.height;
   if (!w || !h) return;
   const px = state.px || PX_PER_SEC;
+  const padL = state.padL || 0;
   const offsetPx = scrollArea.scrollLeft;         // 当前可视区左边缘对应的像素位置
-  const startT = Math.max(0, Math.floor(offsetPx / px));           // 起始整秒
-  const endT = Math.ceil((offsetPx + w) / px) + 1;
+  const startT = Math.max(0, Math.floor((offsetPx - padL) / px));           // 起始整秒
+  const endT = Math.ceil((offsetPx - padL + w) / px) + 1;
 
   rulerCtx.clearRect(0, 0, w, h);
   rulerCtx.fillStyle = "rgba(8,8,12,.86)";
@@ -597,7 +600,7 @@ function drawRuler(){
   for (let sec = startT; sec <= endT; sec++){
     for (let d = 0; d < 10; d++){
       const t = sec + d * 0.1;
-      const x = t * px - offsetPx;   // 转换为屏幕坐标
+      const x = padL + t * px - offsetPx;   // 转换为屏幕坐标
       if (x < -2 || x > w + 2) continue;
       let len, alpha;
       if (d === 0){ len = 13; alpha = .95; }        // 整秒：长刻度
@@ -611,7 +614,7 @@ function drawRuler(){
       rulerCtx.stroke();
     }
     // 整秒数字标签
-    const x = sec * px - offsetPx;
+    const x = padL + sec * px - offsetPx;
     if (x >= -20 && x <= w){
       rulerCtx.fillStyle = "rgba(215,220,235,.92)";
       rulerCtx.fillText(sec + "s", x + 3, 12);
@@ -650,13 +653,13 @@ function resizeForGrowingTime(t){
   }
   t = Number(t); if (!isFinite(t) || t < 0) t = 0;
   const newMax = Math.max(currentMaxTime(), t + 2);
+  const padL = state.padL || 0;
   // 固定像素/秒；仅当超过 canvas 安全上限时才收缩（保证不失真）
   let px = PX_PER_SEC;
-  if (newMax * px + 60 > MAX_CANVAS_W) px = Math.max(6, (MAX_CANVAS_W - 60) / newMax);
+  if (padL + newMax * px > MAX_CANVAS_W) px = Math.max(6, (MAX_CANVAS_W - padL) / newMax);
   if (!isFinite(px) || px <= 0) return;
-  const widthChanged = Math.abs(px - (state.px || 0)) > 0.01;
   state.px = px;
-  const contentW = Math.max(scrollArea.clientWidth, Math.round(newMax * state.px + 60));
+  const contentW = Math.max(scrollArea.clientWidth, Math.round(padL + newMax * state.px));
   if (!isFinite(contentW) || contentW <= 0) return;
   specContent.style.width = contentW + "px";
   specCanvas.style.width = contentW + "px";
@@ -681,11 +684,21 @@ function canAutofollow(){
   if (Date.now() < (state.autofollowPausedUntil || 0)) return false;
   return true;
 }
-// 横向：把"当前录音时刻"对齐到屏幕中线（内容左移、竖线固定）
-function followTimelineByTime(t){
+// 横向跟随：以「频谱线最前端（最新音高时刻）」对齐屏幕中线。
+//  · 因 t=0 已位于中线（padL），最前端天生压在竖线上，无需额外补偿 → 绝不错位
+//  · 内容不足（最前端 < 中线）时：target 会被 clamp 到 0，不滚动
+//  · 全程静音（无音高点）时：退化为按录音时钟推进，画面照常流动
+function followTimelineByTime(t, track){
   if (!state.followRec || state.userScrolling || Date.now() < (state.autofollowPausedUntil || 0)) return;
-  const target = Math.max(0, t * state.px - viewCenterX());
-  state.followTargetX = target;
+  const padL = state.padL || 0;
+  const tr = track || state.tracks[state.activeTrackIdx] || state.tracks[0];
+  let useT = t;
+  if (tr && tr.points && tr.points.length){
+    const last = tr.points[tr.points.length - 1];
+    useT = last.t + (tr.offset || 0);
+  }
+  // 内容坐标 = padL + useT*px；要让其位于中线 → scrollLeft = useT*px
+  state.followTargetX = Math.max(0, useT * state.px);
 }
 function tryAutofollow(){
   if (!canAutofollow()) return;
@@ -744,7 +757,12 @@ function reboundToFollow(){
   if (!tr) return;
   const t = (performance.now() - (tr.startTime || performance.now())) / 1000 + (tr.baseTime || 0);
   const vh = scrollArea.clientHeight;
-  state.followTargetX = Math.max(0, t * state.px - viewCenterX());
+  let useT = t;
+  if (tr.points && tr.points.length){
+    const last = tr.points[tr.points.length - 1];
+    useT = last.t + (tr.offset || 0);
+  }
+  state.followTargetX = Math.max(0, useT * state.px);
   if (tr.points && tr.points.length){
     const last = tr.points[tr.points.length - 1];
     state.followTargetY = Math.max(0, Math.min(specCanvas.height - vh, midiToY(last.midi) - vh * 0.5));
@@ -841,7 +859,8 @@ function showCrosshair(tPos, midi, fixed){
 function renderCrosshair(){
   const { tPos, midi, fixed } = state.crosshair;
   if (tPos == null) return;
-  const contentX = tPos * state.px;                       // 内容坐标（相对谱线左端）
+  const padL = state.padL || 0;
+  const contentX = padL + tPos * state.px;                // 内容坐标（含左内边距）
   const x = fixed ? viewCenterX() : (AXIS_W + contentX - scrollArea.scrollLeft);
   const y = midiToY(midi) - scrollArea.scrollTop;
   const vh = scrollArea.clientHeight;
@@ -874,24 +893,22 @@ function hideCrosshair(){
   crosshairH.style.display = "none";
   crosshairDot.style.display = "none";
 }
-// 录音中/回放中：跟随最新音高点实时更新十字准星（竖线固定在屏幕中央）
+// 录音中/回放中：竖线锁在屏幕中央，横线落在"频谱线最前端"音高上
 let _chFadeTimer = null;
 function updateCrosshair(tr, tNow, fixed){
-  // 固定模式（录音/播放）：竖线始终显示在屏幕中央，横线在无有效音高时隐藏
   if (fixed){
-    const centerT = (scrollArea.scrollLeft + (viewCenterX() - AXIS_W)) / state.px;
     const pts = (tr && tr.points) || [];
-    let best = null, bestD = Infinity;
-    for (let i = pts.length - 1; i >= 0; i--){
-      const d = Math.abs(pts[i].t + (tr.offset||0) - centerT);
-      if (d < bestD){ bestD = d; best = pts[i]; }
-      if (pts[i].t + (tr.offset||0) < centerT - 2) break;
-    }
-    if (best && bestD <= 0.6){
-      state._lastMidi = best.midi;
-      showCrosshair(best.t + (tr.offset||0), best.midi, true);
+    if (pts.length){
+      const last = pts[pts.length - 1];
+      const frontT = last.t + (tr.offset || 0);
+      // 横线始终取"频谱线最前端"的音高；
+      // 竖线恒在屏幕中央。当最前端尚未到达中线时不滚动，因此交点会暂时落在
+      // 中央（横线为首音高）；一旦最前端越过中线，视角滚动使它恰好压在竖线上。
+      state._lastMidi = last.midi;
+      showCrosshair(frontT, last.midi, true);
     } else {
-      // 无音高：竖线仍固定在中央，横线/圆点隐藏（midi=null）
+      // 无任何音高：竖线仍在中央，横线/圆点隐藏
+      const centerT = scrollArea.scrollLeft / state.px;
       showCrosshair(centerT, null, true);
     }
     return;
@@ -921,7 +938,7 @@ function showClickMarker(tPos, midi, noteText){
 function renderClickMarker(){
   if (!state.clickMarker.until || Date.now() > state.clickMarker.until) return;
   const { tPos, midi, text } = state.clickMarker;
-  const x = AXIS_W + tPos * state.px - scrollArea.scrollLeft;
+  const x = AXIS_W + (state.padL || 0) + tPos * state.px - scrollArea.scrollLeft;
   const y = midiToY(midi) - scrollArea.scrollTop;
   clickMarkerDot.style.left = x + "px";  clickMarkerDot.style.top = y + "px";
   clickMarkerBox.style.left = x + "px";
@@ -935,11 +952,48 @@ function resyncOverlays(){
   if (state.crosshair.tPos != null) renderCrosshair();
   renderClickMarker();
 }
+// 非录制/播放态：用户横向滑动时，让横线跟随"竖线所在时刻"的音高上下波动，
+// 交点即当前时刻对应的谱线位置（导入/录音完成后查看时使用）
+function updateCrosshairAtCenter(){
+  if (state.mode === "recording" || state.mode === "playing") return;  // 这两种态由各自循环驱动
+  const padL = state.padL || 0;
+  const tAtCenter = scrollArea.scrollLeft / state.px;   // 竖线处的时间（内容坐标 − padL）
+  let bestMidi = null, bestD = Infinity;
+  for (const tr of state.tracks){
+    if (tr.hidden || !tr.points || !tr.points.length) continue;
+    const pts = tr.points;
+    // 二分定位最近的音高点
+    for (let i = pts.length - 1; i >= 0; i--){
+      const tt = pts[i].t + (tr.offset || 0);
+      const d = Math.abs(tt - tAtCenter);
+      if (d < bestD){ bestD = d; bestMidi = pts[i].midi; }
+      if (tt < tAtCenter - 1.5) break;
+    }
+  }
+  if (bestMidi == null || bestD > 0.8){
+    showCrosshair(tAtCenter, null, true);   // 竖线仍在中央，横线隐藏
+  } else {
+    showCrosshair(tAtCenter, bestMidi, true);
+  }
+}
 
 /* ====================== 频谱绘制 ====================== */
+// 性能要点：
+//  · 背景网格只在"可视横向窗口"内绘制（超长录音不再逐秒遍历整幅画布）
+//  · 每条轨道的 Path2D 缓存，仅在 px/offset/点数/padL 变化时重建
+//  · 轨道点数多时自动关闭光晕（shadowBlur 是 canvas 最贵的操作）以保证帧率
+//  · 只绘制横向可视范围内的点段，避免整条长线反复重绘
+function _visibleTWindow(){
+  const padL = state.padL || 0;
+  const t0 = Math.max(0, (scrollArea.scrollLeft - padL) / state.px - 1);
+  const t1 = (scrollArea.scrollLeft - padL + scrollArea.clientWidth) / state.px + 1;
+  return [t0, t1];
+}
 function drawSpectrum(){
   const w = specCanvas.width, h = specCanvas.height;
   if (!w || !h) return; // 尺寸异常时跳过，避免 IndexSizeError 且不擦除已有内容
+  const padL = state.padL || 0;
+  const px = state.px;
   specCtx.clearRect(0,0,w,h);
   specCtx.fillStyle = "#000"; specCtx.fillRect(0,0,w,h);
 
@@ -948,67 +1002,83 @@ function drawSpectrum(){
     const y = midiToY(m);
     const isC = NOTE_NAMES[((m%12)+12)%12] === "C";
     const isSharp = NOTE_NAMES[((m%12)+12)%12].indexOf("#") === 0;
-    // C 为主参考线（最亮），变化音稍暗，其余为常规浅灰线
     specCtx.strokeStyle = isC ? "rgba(215,215,225,.75)" : (isSharp ? "rgba(150,150,165,.34)" : "rgba(175,175,190,.52)");
     specCtx.lineWidth = isC ? 1.4 : 1;
     specCtx.beginPath(); specCtx.moveTo(0, y); specCtx.lineTo(w, y); specCtx.stroke();
   }
-  // 纵向参考线（时间）
-  const maxT = currentMaxTime();
+  // 纵向参考线（时间）——只画可视窗口
+  const [vT0, vT1] = _visibleTWindow();
+  const s0 = Math.max(0, Math.floor(vT0)), s1 = Math.ceil(vT1);
   specCtx.fillStyle = "#8a8a96"; specCtx.font = "10px sans-serif";
   specCtx.textBaseline = "bottom";
-  for (let s = 0; s <= maxT; s += 1){
-    const x = s * state.px;
-    specCtx.strokeStyle = (s % 5 === 0) ? "rgba(140,140,155,.42)" : "rgba(120,120,135,.18)";
-    specCtx.lineWidth = (s % 5 === 0) ? 1 : 0.6;
-    specCtx.beginPath(); specCtx.moveTo(x, 0); specCtx.lineTo(x, h); specCtx.stroke();
-    if (s % 2 === 0){
-      specCtx.fillText(s + "s", x + 3, h - 3);
-    }
+  specCtx.lineWidth = 1;
+  specCtx.strokeStyle = "rgba(120,120,135,.18)";
+  specCtx.beginPath();
+  for (let s = s0; s <= s1; s++){
+    const x = padL + s * px;
+    specCtx.moveTo(x, 0); specCtx.lineTo(x, h);
   }
+  specCtx.stroke();
+  // 每 5 秒的高亮竖线 + 秒标签
+  specCtx.strokeStyle = "rgba(140,140,155,.42)";
+  specCtx.beginPath();
+  for (let s = s0; s <= s1; s++){ if (s % 5 !== 0) continue; const x = padL + s * px; specCtx.moveTo(x, 0); specCtx.lineTo(x, h); }
+  specCtx.stroke();
+  for (let s = s0; s <= s1; s++){ if (s % 2 !== 0) continue; specCtx.fillText(s + "s", padL + s * px + 3, h - 3); }
 
-  // 各轨道音高线（高光彩色线条）——加粗+双层描边，黑底上极醒目
-  for (const tr of state.tracks){
-    if (tr.hidden) continue;
-    if (tr.points.length < 2) continue;
-    const path = new Path2D();
-    let started = false;
-    for (const p of tr.points){
-      const x = (p.t + (tr.offset||0)) * state.px;
-      const y = midiToY(p.midi);
-      if (!started){ path.moveTo(x, y); started = true; }
-      else path.lineTo(x, y);
+  // 轨道数量决定是否启用光晕（多轨时关闭以保证顺滑帧率）
+  const visibleTracks = state.tracks.filter(t => !t.hidden && t.points.length >= 2);
+  const useGlow = visibleTracks.length <= 2;
+  const cullPad = 60;   // 可视区外额外保留的像素（避免边缘突现）
+
+  for (const tr of visibleTracks){
+    // ---- Path2D 缓存：键值含 px/offset/padL/点数 ----
+    const key = px.toFixed(2) + "|" + (tr.offset||0) + "|" + padL + "|" + tr.points.length + "|" + w;
+    let cached = tr._path;
+    if (!cached || cached.key !== key){
+      const path = new Path2D();
+      let started = false;
+      for (const p of tr.points){
+        const x = padL + (p.t + (tr.offset||0)) * px;
+        const y = midiToY(p.midi);
+        if (!started){ path.moveTo(x, y); started = true; } else path.lineTo(x, y);
+      }
+      cached = tr._path = { key, path };
     }
+    const path = cached.path;
+    // ---- 可视裁剪：只绘制落在可视区内的部分 ----
+    const xL = scrollArea.scrollLeft - cullPad, xR = scrollArea.scrollLeft + scrollArea.clientWidth + cullPad;
     specCtx.save();
+    specCtx.beginPath(); specCtx.rect(xL, 0, xR - xL, h); specCtx.clip();
     specCtx.lineJoin = "round"; specCtx.lineCap = "round";
-    // ① 外层彩色光晕（最醒目）
-    specCtx.shadowColor = tr.color; specCtx.shadowBlur = 14;
-    specCtx.strokeStyle = tr.color; specCtx.lineWidth = 3.6;
-    specCtx.stroke(path);
-    // ② 中层亮色实线（提高饱和度与亮度）
-    specCtx.shadowBlur = 6;
-    specCtx.strokeStyle = lighten(tr.color, 0.35); specCtx.lineWidth = 2.2;
-    specCtx.stroke(path);
+    if (useGlow){
+      // ① 外层彩色光晕（最醒目）
+      specCtx.shadowColor = tr.color; specCtx.shadowBlur = 14;
+      specCtx.strokeStyle = tr.color; specCtx.lineWidth = 3.6;
+      specCtx.stroke(path);
+      // ② 中层亮色实线（提高饱和度与亮度）
+      specCtx.shadowBlur = 6;
+      specCtx.strokeStyle = lighten(tr.color, 0.35); specCtx.lineWidth = 2.2;
+      specCtx.stroke(path);
+    } else {
+      // 多轨：单层描边（无光晕）——大幅降低 GPU/CPU 开销
+      specCtx.strokeStyle = lighten(tr.color, 0.2); specCtx.lineWidth = 2.4;
+      specCtx.stroke(path);
+    }
     // ③ 内层白色高光芯线（让线条"发光"）
     specCtx.shadowBlur = 0;
     specCtx.strokeStyle = "rgba(255,255,255,.85)"; specCtx.lineWidth = 0.9;
     specCtx.stroke(path);
-    specCtx.restore();
     // 高亮描边（点击列表时）
     if (tr.highlight){
-      specCtx.save();
-      specCtx.lineJoin = "round"; specCtx.lineCap = "round";
       specCtx.shadowColor = "rgba(255,224,0,.95)"; specCtx.shadowBlur = 16;
       specCtx.strokeStyle = "rgba(255,224,0,.95)"; specCtx.lineWidth = 5.5;
       specCtx.stroke(path);
-      specCtx.restore();
     }
     // 同色柔光闪烁（圆按钮切换显隐时触发，约 640ms 一个明暗周期）
     if (tr.glowUntil && performance.now() < tr.glowUntil){
       const phase = (performance.now() % 640) / 640;
       const a = 0.25 + 0.75 * (0.5 - 0.5 * Math.cos(phase * Math.PI * 2));
-      specCtx.save();
-      specCtx.lineJoin = "round"; specCtx.lineCap = "round";
       specCtx.shadowColor = tr.color; specCtx.shadowBlur = 26;
       specCtx.strokeStyle = tr.color; specCtx.globalAlpha = a;
       specCtx.lineWidth = 8.5;
@@ -1016,8 +1086,9 @@ function drawSpectrum(){
       specCtx.strokeStyle = lighten(tr.color, 0.55);
       specCtx.shadowBlur = 34; specCtx.lineWidth = 4;
       specCtx.stroke(path);
-      specCtx.restore();
+      specCtx.globalAlpha = 1;
     }
+    specCtx.restore();
   }
 }
 // 将颜色提亮（amount 0~1），用于让线条更亮
@@ -1862,14 +1933,15 @@ function showSaveModal(){
 }
 
 /* ====================== 导入多文件 ====================== */
-// 支持的扩展名：尽量放宽，覆盖「常见音频 + 视频容器（自动抽取音轨）」
-const AUDIO_EXT_RE = /\.(wav|wave|mp3|mp2|mpga|m4a|m4b|m4r|mp4|m4v|aac|ogg|oga|opus|webm|flac|alac|caf|aif|aiff|aifc|amr|awb|3gp|3gpp|3g2|3gpp2|wma|mka|mkv|ts|mts|m2ts|mov|avi|flv|f4v|mpg|mpeg|vob|ogv|rm|ra|rmvb|ape|wv|au|snd|voc|ac3|dts|gsm|silk|slk|mid|midi|kar|spx|xm|mod|it|s3m)$/i;
+// 支持的扩展名：覆盖「常见音频 + 视频容器（自动抽取音轨）+ 专业/冷门音频」
+const AUDIO_EXT_RE = /\.(wav|wave|bwf|mp3|mp2|mpga|mp1|m4a|m4b|m4r|m4p|mp4|m4v|aac|adts|ogg|oga|ogx|opus|webm|weba|flac|alac|caf|aif|aiff|aifc|amr|awb|3gp|3gpp|3g2|wma|asf|mka|mkv|ts|mts|m2ts|mov|qt|avi|flv|f4v|f4a|mpg|mpeg|vob|ogv|rm|ra|rmvb|ape|mac|wv|tta|au|snd|voc|ac3|eac3|dts|dtshd|gsm|silk|slk|mid|midi|kar|rmi|spx|mlp|thd|cda|aa|aax|oma|at3|vqf|dss|dvf|msv|shn|tak|svx|sf|xi|s3m|mod|it|xm|mtm|dsm|med|umx|psm|ptm|dbm|imf|mptm|mo3|gbs|nsf|spc|vgm|ay|sid|sap|sf2|sf3|dls)$/i;
 function isAudioFile(f){
   if (!f) return false;
   const t = (f.type || "").toLowerCase();
   if (t.startsWith("audio")) return true;
   if (t.startsWith("video")) return true;       // 视频容器：抽取其音轨
   if (t === "application/ogg" || t === "application/x-ogg") return true;
+  // 手机上很多音频被标成 octet-stream 或空类型：统一按扩展名兜底判断
   return AUDIO_EXT_RE.test(f.name || "");
 }
 // 是否为视频类容器（解码时给用户额外提示）
@@ -2343,6 +2415,11 @@ function init(){
     noteAxis.scrollTop = scrollArea.scrollTop;
     syncRulerScroll();
     resyncOverlays();
+    // 已导入/已录完，且有频谱线时：滑动让横线跟随竖线处的音高波动
+    if (state.mode !== "recording" && state.mode !== "playing"
+        && state.tracks.some(t => !t.hidden && t.points && t.points.length)){
+      updateCrosshairAtCenter();
+    }
   }, { passive: true });
   // 用户触摸/滑动 → 暂停自动跟随，由用户控制；停手 1.2 秒后自动回弹到跟随视角
   let _resumeTimer = null;
