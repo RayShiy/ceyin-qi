@@ -2,7 +2,7 @@
  * 策略：缓存优先（Cache First）→ 首访后所有资源本地直取，秒开、断网可用。
  * 更新：后台静默拉取新版并写入缓存，下次打开即为新版。
  */
-const VERSION = 'pitch-v7';
+const VERSION = 'pitch-v8';
 const CACHE = VERSION;
 const ASSETS = [
   './',
